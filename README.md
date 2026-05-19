@@ -1,6 +1,6 @@
 # 🎯 tracking-cano
 
-YOLO26을 이용해 웹캠 영상에서 지정한 객체를 추적하고, 주변 물체와의 상호작용까지 종합 판단하여 자연어 한 문장으로 이동 상태를 로깅하는 시스템.
+YOLO26을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 추적하고, 주변 물체와의 상호작용까지 종합 판단하여 자연어 한 문장으로 이동 상태를 로깅하는 시스템.
 
 추적 대상은 고양이뿐만 아니라 사람, 동물, 차량 등 COCO 클래스 중 무엇이든 설정 가능합니다.
 
@@ -41,16 +41,31 @@ Camera ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction D
 
 ---
 
-## Quick Start
+## Quick Start (Docker)
 
 ```bash
-# 설치
+# 설정 파일 준비
+cp config/spaces.yaml.example config/spaces.yaml   # RTSP URL 등 실제 값으로 수정
+cp .env.example .env                               # LLM API key 입력
+
+# 빌드 및 실행 (CPU)
+docker compose up --build
+
+# GPU 모드
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+## Quick Start (로컬)
+
+```bash
+# 의존성 설치
 pip install -r requirements.txt
 
-# 환경 변수 설정
-cp .env.example .env   # LLM API key 입력
+# 설정 파일 준비
+cp config/spaces.yaml.example config/spaces.yaml   # RTSP URL 등 실제 값으로 수정
+cp .env.example .env                               # LLM API key 입력
 
-# 실시간 웹캠 모드
+# 실시간 모션 모드
 python main.py --live
 
 # 오프라인 영상 분석
@@ -59,40 +74,38 @@ python main.py --video ./sample.mp4
 
 ---
 
-## Configuration
+## Configuration (로컬 실행 시)
 
-### `config/spaces.yaml`
+### `config/spaces.yaml` — RTSP URL 등 설정 (`.gitignore` 제외)
 
 ```yaml
-spaces:
-  - id: room_living
-    name: 거실
-    cameras: [cam_01, cam_02]
-  - id: room_bedroom
-    name: 침실
-    cameras: [cam_03]
-
 cameras:
   - id: cam_01
-    source: /dev/video0
-    status: active
-    target_classes: [cat]       # 고양이 추적
-  - id: cam_02
-    source: /dev/video1
-    status: active
-    target_classes: [person]    # 사람 추적
-  - id: cam_03
-    source: /dev/video2
-    status: active
-    target_classes: [cat]
+    source: rtsp://your-camera-ip:554/stream   # ← 실제 RTSP URL로 변경
+    status: active                              # active | inactive
+    target_classes: [cat, person]               # COCO 클래스명
+
+thresholds:
+  overlap: 0.3        # bbox 겹침률 (IoU)
+  distance: 50        # 중심점 간 거리 (px)
+  speed_slow: 20      # 정지/천천히 이동 기준 (px/frame)
+  speed_fast: 40      # 천천히/빠르게 이동 기준 (px/frame)
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  api_endpoint: https://api.openai.com/v1
+  temperature: 0.7
 ```
 
-### `.env`
+`config/spaces.yaml.example`을 복사해서 사용하세요. `.gitignore`에 `config/spaces.yaml`이 제외되어 있습니다.
+
+### `.env` — LLM API key (`.gitignore` 제외)
 
 ```env
 API_BASE_URL=https://api.openai.com/v1  # 또는 다른 OpenAI 호환 엔드포인트
 API_KEY=your_api_key_here
-MODEL_NAME=gemma4-e4b                    # 사용하려는 모델명
+MODEL_NAME=gpt-4o-mini                    # 사용하려는 모델명
 ```
 
 ---
@@ -101,7 +114,7 @@ MODEL_NAME=gemma4-e4b                    # 사용하려는 모델명
 
 | 옵션 | 설명 |
 |------|------|
-| `--live` | 실시간 웹캠 모드 (구성 파일 기반) |
+| `--live` | 실시간 모션 모드 (구성 파일 기반) |
 | `--video <path>` | 오프라인 영상 분석 |
 | `--config <path>` | 구성 파일 경로 (기본: `config/spaces.yaml`) |
 
@@ -111,23 +124,38 @@ MODEL_NAME=gemma4-e4b                    # 사용하려는 모델명
 
 ```
 tracking-cano/
-├── main.py                  # 진입점
+├── main.py                          # 진입점
+├── Dockerfile                       # CPU 베이스 컨테이너
+├── Dockerfile.gpu                   # GPU 옵션 컨테이너
+├── docker-compose.yml               # 기본 서비스 정의
+├── docker-compose.gpu.yml           # GPU 오버레이
 ├── config/
-│   └── spaces.yaml          # 동적 구성 파일
+│   ├── __init__.py
+│   ├── spaces.yaml                  # RTSP URL 등 민감 정보 (gitignore)
+│   └── spaces.yaml.example          # 커밋용 템플릿
 ├── core/
-│   ├── config_manager.py    # YAML 읽기 + 핫리로드
-│   ├── pipeline.py          # 단일 카메라 파이프라인
-│   └── orchestrator.py      # 다중 카메라 오케스트레이션
+│   ├── __init__.py
+│   ├── config_manager.py            # YAML 읽기 + 핫리로드
+│   ├── pipeline.py                  # 단일 카메라 파이프라인
+│   └── orchestrator.py              # 다중 카메라 오케스트레이션
 ├── modules/
-│   ├── detector.py          # YOLO26 감지
-│   ├── tracker.py           # ByteTrack 추적
-│   ├── analyzer.py          # 이동 상태 분류
-│   └── interaction_detector.py  # 상호작용 판단
+│   ├── __init__.py
+│   ├── detector.py                  # YOLO26 감지
+│   ├── tracker.py                   # ByteTrack 추적
+│   ├── analyzer.py                  # 이동 상태 분류
+│   └── interaction_detector.py      # 상호작용 판단
 ├── nlp/
-│   └── logger.py            # LLM 자연어 로깅
+│   ├── __init__.py
+│   └── logger.py                    # LLM 자연어 로깅
 ├── utils/
-│   └── video.py             # 영상 캡처 헬퍼
-└── logs/                    # 로그 출력 디렉토리
+│   ├── __init__.py
+│   └── video.py                     # 영상 캡처 헬퍼
+├── logs/                            # 로그 출력 디렉토리
+├── .env                             # 민감 정보 (gitignore)
+├── .env.example                     # 템플릿
+├── .gitignore                       # git 제외 패턴
+├── requirements.txt                 # 의존성
+└── MASTER_PLAN.md                   # 프로젝트 마스터 플랜
 ```
 
 ---

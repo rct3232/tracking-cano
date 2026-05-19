@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/*.log
+
+# YOLO models (downloaded)
+*.pt
+
+# Data
+*.mp4
+*.avi
+
+# Config (민감 정보 포함)
+config/spaces.yaml
+
+# Docker
+docker-compose.override.yml

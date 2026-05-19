@@ -1,0 +1,8 @@
+ultralytics
+opencv-python-headless
+bytetrack
+pyyaml
+python-dotenv
+watchdog
+openai
+pydantic

@@ -1,0 +1,26 @@
+# === 카메라 설정 (필수) ===
+cameras:
+  - id: cam_01
+    source: rtsp://your-camera-ip:554/stream   # ← 실제 RTSP URL로 변경
+    status: active                              # active | inactive
+    target_classes: [cat, person]               # COCO 클래스명
+
+# === 공간 정의 (선택) ===
+# spaces:
+#   - id: room_living
+#     name: 거실
+#     cameras: [cam_01]
+
+# === 임계값 설정 (선택 — 생략 시 디폴트 적용) ===
+# thresholds:
+#   overlap: 0.3        # bbox 겹침률 (IoU)
+#   distance: 50        # 중심점 간 거리 (px)
+#   speed_slow: 20      # 정지/천천히 이동 기준 (px/frame)
+#   speed_fast: 40      # 천천히/빠르게 이동 기준 (px/frame)
+
+# === LLM 설정 (선택 — 생략 시 디폴트 적용) ===
+# llm:
+#   provider: openai
+#   model: gpt-4o-mini
+#   api_endpoint: https://api.openai.com/v1
+#   temperature: 0.7
