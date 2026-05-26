@@ -1,9 +1,18 @@
 # === 카메라 설정 (필수) ===
 cameras:
-  - id: cam_01
-    source: rtsp://your-camera-ip:554/stream   # ← 실제 RTSP URL로 변경
+  - id: livingroom
+    source: go2rtc:livingroom_cam               # go2rtc:스트림명 형식 (GO2RTC_URL /stream?src=... 로 자동 변환)
     status: active                              # active | inactive
     target_classes: [cat, person]               # COCO 클래스명
+  - id: hallway
+    source: go2rtc:hallway_cam
+    status: active
+    target_classes: [person]
+  # 직접 RTSP 사용 예시:
+  # - id: cam_03
+  #   source: rtsp://192.168.0.100:554/stream1
+  #   status: active
+  #   target_classes: [cat]
 
 # === 공간 정의 (선택) ===
 # spaces:

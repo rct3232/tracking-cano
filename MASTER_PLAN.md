@@ -30,6 +30,7 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 |------|------|
 | Object Detection | `ultralytics` — YOLO26 (yolo26s.pt 권장) |
 | Video Capture | `opencv-python-headless` |
+| Stream Broker | go2rtc (HTTP-MPEGTS) |
 | Object Tracking | `bytetrack` |
 | Movement + Interaction Analysis | `numpy` |
 | NLP Logging | OpenAI API 호환 LLM |
@@ -97,6 +98,15 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
   - llm: provider, model
 - [ ] `config_manager.py` — YAML 로드 + 유효성 검사
 - [ ] 구성 파일 변경 감지 (watchdog)
+
+### 2.2 go2rtc 스트림 자동 해결
+- [ ] `.env`에 `GO2RTC_URL=http://host:port` 설정
+- [ ] `source` 필드에 `go2rtc:스트림명` 형식 지원
+  - 예: `source: go2rtc:livingroom_cam` → `{GO2RTC_URL}/stream?src=livingroom_cam`
+- [ ] `utils/video.py` — `resolve_source()` 헬퍼
+  - `go2rtc:` 프리픽스 → HTTP-MPEGTS URL로 변환
+  - `rtsp://`, `http://`, 파일 경로 → 그대로 반환
+- [ ] `config_manager.py` — YAML 파싱 시 `resolve_source()` 자동 적용
 
 ### 2.2 상호작용 감지 모듈
 - [ ] `interaction_detector.py` — bbox 기반 상호작용 판단
@@ -180,7 +190,7 @@ tracking-cano/
 │   └── spaces.yaml          # 동적 구성 파일 (Phase 2+)
 ├── core/
 │   ├── __init__.py
-│   ├── config_manager.py    # YAML 읽기 + watchdog 핫리로드
+│   ├── config_manager.py    # YAML 읽기 + go2rtc URL 해결 + watchdog 핫리로드
 │   ├── pipeline.py          # 단일 카메라 파이프라인
 │   └── orchestrator.py      # N개 카메라 병렬 + 공간별 그룹핑
 ├── modules/
@@ -194,9 +204,9 @@ tracking-cano/
 │   └── logger.py            # LLM 자연어 로깅
 ├── utils/
 │   ├── __init__.py
-│   └── video.py             # 웹캠/파일/RTSP 캡처 헬퍼
+│   └── video.py             # go2rtc/RTSP/파일 소스 URL 해결 헬퍼
 ├── logs/                    # 로그 출력 디렉토리
-├── .env                     # LLM API credentials
+├── .env                     # LLM API + GO2RTC_URL
 ├── .env.example             # 템플릿
 ├── .gitignore
 ├── requirements.txt
@@ -208,6 +218,6 @@ tracking-cano/
 ## 진행 상황
 
 - Phase 1: ⬜ 시작 전
-- Phase 2: ⬜ 시작 전
+- Phase 2: ⬜ 시작 전 (2.2 go2rtc 통합 완료)
 - Phase 3: ⬜ 시작 전 (선택적)
 - Phase 4: ⬜ 시작 전 (선택적)
