@@ -164,12 +164,14 @@ class ConfigDiff:
     removed_cameras: Set[str]
     added_spaces: Set[str]
     removed_spaces: Set[str]
+    reassigned_cameras: Dict[str, tuple[str, str]]
 
     def __init__(self):
         self.added_cameras = set()
         self.removed_cameras = set()
         self.added_spaces = set()
         self.removed_spaces = set()
+        self.reassigned_cameras = {}
 
     @property
     def is_empty(self) -> bool:
@@ -184,6 +186,13 @@ class ConfigDiff:
         )
 
 
+def _build_cam_to_space(app_config: AppConfig) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for space in app_config.spaces:
+        for cam_id in space.camera_ids:
+            mapping[cam_id] = space.id
+    return mapping
+
 def diff_configs(old: AppConfig, new: AppConfig) -> ConfigDiff:
     old_cam_ids = {c.id for c in old.cameras}
     new_cam_ids = {c.id for c in new.cameras}
@@ -194,6 +203,16 @@ def diff_configs(old: AppConfig, new: AppConfig) -> ConfigDiff:
     diff.removed_cameras = old_cam_ids - new_cam_ids
     diff.added_spaces = new_space_ids - old_space_ids
     diff.removed_spaces = old_space_ids - new_space_ids
+
+    # Detect camera reassignments (same ID, different space)
+    old_cam_to_space = _build_cam_to_space(old)
+    new_cam_to_space = _build_cam_to_space(new)
+    for cam_id in old_cam_ids & new_cam_ids:
+        old_space = old_cam_to_space.get(cam_id)
+        new_space = new_cam_to_space.get(cam_id)
+        if old_space != new_space:
+            diff.reassigned_cameras[cam_id] = (old_space, new_space)
+
     return diff
 
 

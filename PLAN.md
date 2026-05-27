@@ -35,9 +35,9 @@ SpaceLogger가 Orchestrator → Pipeline → NLPLogger 파이프라인에 실제
 - [x] `Orchestrator`에 `flush_spaces()` 메서드 추가 → 각 공간별 SpaceLogger.flush() 호출
 
 ### 4. _on_config_change에 공간 변경 처리
-- [x] `diff.added_spaces` → 로그 출력
+- [x] `diff.added_spaces` → `set_camera_count()` 호출
 - [x] `diff.removed_spaces` → SpaceLogger.flush() 후 버퍼 정리
-- [ ] 카메라 재할당 감지 (기존 공간 → 새 공간)
+- [x] 카메라 재할당 감지 (기존 공간 → 새 공간)
 
 ---
 

@@ -233,13 +233,15 @@ SPACE_SYSTEM_PROMPT = (
 
 
 class SpaceLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs"):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", flush_threshold: int = 0):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
         self.client: Optional[OpenAI] = None
-        self._buffer: Dict[str, Dict[str, str]] = {}
+        self._buffer: Dict[str, Dict[str, List[str]]] = {}
+        self._flush_threshold = flush_threshold
+        self._camera_counts: Dict[str, int] = {}
 
     def _ensure_client(self):
         if self.client is None and self.config.api_key:
@@ -248,10 +250,15 @@ class SpaceLogger:
                 api_key=self.config.api_key,
             )
 
+    def set_camera_count(self, space_id: str, count: int):
+        self._camera_counts[space_id] = count
+
     def collect(self, space_id: str, camera_id: str, text: str):
         if space_id not in self._buffer:
             self._buffer[space_id] = {}
-        self._buffer[space_id][camera_id] = text
+        if camera_id not in self._buffer[space_id]:
+            self._buffer[space_id][camera_id] = []
+        self._buffer[space_id][camera_id].append(text)
 
     def flush(self, space_id: str, space_name: str) -> Optional[str]:
         entries = self._buffer.pop(space_id, {})
@@ -264,8 +271,9 @@ class SpaceLogger:
             return None
         timestamp = datetime.now(timezone.utc).isoformat()
         prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
-        for cam_id, text in sorted(entries.items()):
-            prompt_lines.append(f"- {cam_id}: {text}")
+        for cam_id, texts in sorted(entries.items()):
+            for t in texts:
+                prompt_lines.append(f"- {cam_id}: {t}")
         prompt_lines.append("")
         prompt_lines.append("Synthesize these camera observations into one sentence.")
         prompt = "\n".join(prompt_lines)
@@ -287,3 +295,11 @@ class SpaceLogger:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
         return text
+
+    def try_flush(self, space_id: str, space_name: str) -> Optional[str]:
+        if self._flush_threshold <= 0:
+            return None
+        entries = self._buffer.get(space_id, {})
+        if len(entries) < self._flush_threshold:
+            return None
+        return self.flush(space_id, space_name)

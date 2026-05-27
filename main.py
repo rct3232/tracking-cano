@@ -114,7 +114,8 @@ def run_video(config: PipelineConfig, video_path: str):
 def run_multi(config_path: str):
     from core.config_manager import load_config
     app_config = load_config(config_path)
-    space_logger = SpaceLogger(PipelineConfig().llm)
+    max_cameras = max((len(s.camera_ids) for s in app_config.spaces), default=1)
+    space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras)
     orchestrator = Orchestrator(app_config, space_logger)
     orchestrator.start()
     watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
@@ -136,6 +137,10 @@ def run_multi(config_path: str):
 
 
 def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new_config, diff):
+    for cam_id in diff.reassigned_cameras:
+        old_space, new_space = diff.reassigned_cameras[cam_id]
+        logger.info("Camera %s reassigned: %s → %s", cam_id, old_space, new_space)
+        orchestrator.reassign_camera(cam_id, old_space, new_space)
     for cam_id in diff.added_cameras:
         cam = next((c for c in new_config.cameras if c.id == cam_id), None)
         if cam:
@@ -143,7 +148,10 @@ def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new
     for cam_id in diff.removed_cameras:
         orchestrator.remove_camera(cam_id)
     for space_id in diff.added_spaces:
-        logger.info("Space added: %s", space_id)
+        space = next((s for s in new_config.spaces if s.id == space_id), None)
+        if space:
+            logger.info("Space added: %s (cameras: %d)", space_id, len(space.camera_ids))
+            space_logger.set_camera_count(space_id, len(space.camera_ids))
     for space_id in diff.removed_spaces:
         text = space_logger.flush(space_id, space_id)
         if text:

@@ -80,6 +80,9 @@ class Orchestrator:
         self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
         self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
+        if self.space_logger:
+            for space in app_config.spaces:
+                self.space_logger.set_camera_count(space.id, len(space.camera_ids))
 
     @property
     def spaces(self) -> list[SpaceConfig]:
@@ -113,6 +116,24 @@ class Orchestrator:
         if worker:
             worker.stop()
         self._cam_to_space.pop(camera_id, None)
+
+    def reassign_camera(self, camera_id: str, old_space_id: str, new_space_id: str):
+        self._cam_to_space[camera_id] = new_space_id
+        if self.space_logger:
+            self.space_logger.flush(old_space_id, old_space_id)
+            old_space = next((s for s in self.spaces if s.id == old_space_id), None)
+            new_space = next((s for s in self.spaces if s.id == new_space_id), None)
+            if old_space:
+                self.space_logger.set_camera_count(old_space_id, len(old_space.camera_ids))
+            if new_space:
+                self.space_logger.set_camera_count(new_space_id, len(new_space.camera_ids))
+        with self._lock:
+            worker = self._workers.pop(camera_id, None)
+        if worker:
+            worker.stop()
+        cam = next((c for c in self.app_config.cameras if c.id == camera_id), None)
+        if cam:
+            self.add_camera(cam)
 
     def get_space_cameras(self, space_id: str) -> list[str]:
         for space in self.spaces:

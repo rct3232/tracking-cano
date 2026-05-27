@@ -93,6 +93,7 @@ class Pipeline:
     def _collect(self, text: str):
         if self.space_logger and self.space_id:
             self.space_logger.collect(self.space_id, self.camera_id, text)
+            self.space_logger.try_flush(self.space_id, self.space_id)
 
     def _check_disappeared(self, current_ids: Set[int]) -> List[tuple]:
         disappeared = []

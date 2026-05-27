@@ -121,16 +121,16 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 - [x] 동일 공간의 여러 카메라 로그 수집 (SpaceLogger 클래스 구현)
 - [x] 통합 프롬프트: "[방: 거실] cam_01에서 ~, cam_02에서 ~"
 - [x] LLM이 종합 자연어 표현 생성
-- [ ] 상태 변화 시점만 호출 (비용 최적화) — **SpaceLogger flush 전략 보완 필요**
+- [x] 상태 변화 시점만 호출 (비용 최적화) — **N개 카메라 수집 시 즉시 flush**
 
 ### 2.6 핫리로드 구현
 - [x] `config_manager.py` — 파일 감시 루프
 - [x] 구성 변경 시 차분 계산:
   - [x] 추가된 카메라 → pipeline 시작
   - [x] 제거된 카메라 → pipeline 종료 + 리소스 정리
-  - [ ] 재할당된 카메라 → pipeline 공간 이동
-  - [ ] 추가된 공간 → LLM 컨텍스트 생성
-  - [ ] 삭제된 공간 → LLM 컨텍스트 정리
+  - [x] 재할당된 카메라 → pipeline 공간 이동
+  - [x] 추가된 공간 → LLM 컨텍스트 생성
+  - [x] 삭제된 공간 → LLM 컨텍스트 정리
 - [x] 안전한 전환 (실행 중인 프레임 처리 완료 후 적용)
 
 ### 2.7 CLI 확장
@@ -138,11 +138,11 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 - [x] `python main.py --video <path>` — 단일 영상 모드 유지
 - [x] 구성 파일 경로 옵션 (`--config <path>`)
 
-### 2.8 미완성 — SpaceLogger 실제 연결
-- [ ] Orchestrator → Pipeline → SpaceLogger 연결
-- [ ] Pipeline에서 SpaceLogger.collect() 호출
-- [ ] SpaceLogger.flush() 주기적/이벤트 기반 전략
-- [ ] Hot-reload 시 공간 추가/삭제 처리
+### 2.8 SpaceLogger 실제 연결
+- [x] Orchestrator → Pipeline → SpaceLogger 연결
+- [x] Pipeline에서 SpaceLogger.collect() 호출
+- [x] SpaceLogger.flush() 주기적/이벤트 기반 전략 (N개 카메라 수집 시 즉시 flush + 10초 안전망)
+- [x] Hot-reload 시 공간 추가/삭제 처리
 
 ---
 
@@ -222,6 +222,6 @@ tracking-cano/
 ## 진행 상황
 
 - Phase 1: ✅ 완료 (1.2~1.8 구현)
-- Phase 2: 🔄 거의 완료 (2.8 SpaceLogger 실제 연결 작업 중)
+- Phase 2: ✅ 완료 (2.1~2.8 구현)
 - Phase 3: ⬜ 시작 전 (선택적)
 - Phase 4: ⬜ 시작 전 (선택적)
