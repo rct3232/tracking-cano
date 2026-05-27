@@ -6,7 +6,10 @@ services:
     container_name: tracking-cano
     env_file:
       - .env
+    environment:
+      - RTSP_URL=${RTSP_URL}
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
+    command: ["--live", "${RTSP_URL}"]
     restart: unless-stopped

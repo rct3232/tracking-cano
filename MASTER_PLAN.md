@@ -48,43 +48,43 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 - [ ] `.gitignore` 작성
 
 ### 1.2 설정 시스템
-- [ ] `config.py` — YOLO 모델, threshold, LLM 설정 로드
-- [ ] `python-dotenv`로 API key 관리
-- [ ] 기본값 제공 (thresholds: speed_slow=20, speed_fast=40, overlap=0.3, distance=50px)
+- [x] `config.py` — YOLO 모델, threshold, LLM 설정 로드
+- [x] `python-dotenv`로 API key 관리
+- [x] 기본값 제공 (thresholds: speed_slow=20, speed_fast=40, overlap=0.3, distance=50px)
 
 ### 1.3 YOLO26 감지 모듈
-- [ ] `detector.py` — YOLO26 모델 로드 및 추론
-- [ ] 단일 프레임에 대한 bbox + class 반환
-- [ ] target_classes 기반 필터링 (COCO 클래스)
-- [ ] GPU/CPU 자동 감지
+- [x] `detector.py` — YOLO26 모델 로드 및 추론
+- [x] 단일 프레임에 대한 bbox + class 반환
+- [x] target_classes 기반 필터링 (COCO 클래스)
+- [x] GPU/CPU 자동 감지
 
 ### 1.4 ByteTrack 추적 모듈
-- [ ] `tracker.py` — ByteTrack 초기화 및 업데이트
-- [ ] 객체 ID 할당 및 유지
-- [ ] 이전 프레임 → 현재 프레임 매칭
+- [x] `tracker.py` — ByteTrack 초기화 및 업데이트 (ultralytics 내장)
+- [x] 객체 ID 할당 및 유지
+- [x] 이전 프레임 → 현재 프레임 매칭
 
 ### 1.5 이동 상태 분석기
-- [ ] `analyzer.py` — 속도/가속도/방향 계산
-- [ ] 상태 분류: 정지, 천천히 이동, 빠르게 이동, 돌진, 회전
-- [ ] 임계값 기반 판단 (config에서 로드)
+- [x] `analyzer.py` — 속도/가속도/방향 계산
+- [x] 상태 분류: 정지, 천천히 이동, 빠르게 이동, 돌진, 회전
+- [x] 임계값 기반 판단 (config에서 로드)
 
 ### 1.6 자연어 로깅
-- [ ] `nlp_logger.py` — OpenAI API 호환 LLM 연결
-- [ ] 상태 변화 감지 시 LLM 호출
-- [ ] 프롬프트 템플릿 설계 (객체 행동 관찰 전문가)
-- [ ] 로그 출력 + 파일 저장 (`logs/` 디렉토리)
+- [x] `nlp/logger.py` — OpenAI API 호환 LLM 연결
+- [x] 상태 변화 감지 시 LLM 호출
+- [x] 프롬프트 템플릿 설계 (객체 행동 관찰 전문가)
+- [x] 로그 출력 + 파일 저장 (`logs/` 디렉토리)
 
 ### 1.7 단일 카메라 파이프라인 통합
-- [ ] `pipeline.py` — detector → tracker → analyzer → logger 연결
-- [ ] 실시간 웹캠 모드 (`--live`)
-- [ ] 오프라인 영상 모드 (`--video <path>`)
-- [ ] 프레임별 처리 루프 + 상태 변화 감지 로직
+- [x] `core/pipeline.py` — detector → tracker → analyzer → logger 연결
+- [x] 실시간 웹캠 모드 (`--live`)
+- [x] 오프라인 영상 모드 (`--video <path>`)
+- [x] 프레임별 처리 루프 + 상태 변화 감지 로직
 
 ### 1.8 진입점 및 CLI
-- [ ] `main.py` — argparse로 실행 모드 선택
-- [ ] `python main.py --live --camera 0`
-- [ ] `python main.py --video ./sample.mp4`
-- [ ] Graceful shutdown (Ctrl+C)
+- [x] `main.py` — argparse로 실행 모드 선택
+- [x] `python main.py --live --camera 0`
+- [x] `python main.py --video ./sample.mp4`
+- [x] Graceful shutdown (Ctrl+C)
 
 ---
 
@@ -217,7 +217,7 @@ tracking-cano/
 
 ## 진행 상황
 
-- Phase 1: ⬜ 시작 전
-- Phase 2: ⬜ 시작 전 (2.2 go2rtc 통합 완료)
+- Phase 1: ✅ 완료 (1.2~1.8 구현)
+- Phase 2: ⬜ 시작 전
 - Phase 3: ⬜ 시작 전 (선택적)
 - Phase 4: ⬜ 시작 전 (선택적)

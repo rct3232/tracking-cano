@@ -3,6 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.gpu
+    container_name: tracking-cano-gpu
+    env_file:
+      - .env
+    environment:
+      - RTSP_URL=${RTSP_URL}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    command: ["--live", "${RTSP_URL}"]
     deploy:
       resources:
         reservations:
@@ -10,3 +19,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    restart: unless-stopped
