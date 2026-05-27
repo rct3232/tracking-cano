@@ -5,3 +5,4 @@ python-dotenv
 watchdog
 openai
 pydantic
+lap>=0.5.12

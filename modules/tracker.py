@@ -5,6 +5,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from config.config import YOLOConfig, Thresholds
+from modules.tile_detector import HybridDetector
 
 
 class MovementState(Enum):
@@ -42,24 +43,30 @@ class Tracker:
     def _ensure_loaded(self):
         if self.model is None:
             self.model = YOLO(self.config.model_path)
+            self.detector = HybridDetector(
+                self.model,
+                grid_x=self.config.tile_grid_x,
+                grid_y=self.config.tile_grid_y,
+                overlap=self.config.tile_overlap,
+                enabled=self.config.tile_enabled,
+            )
 
     def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int) -> List[TrackedBBox]:
         self._ensure_loaded()
         try:
-            results = self.model.track(
+            result = self.detector.detect(
                 frame,
                 conf=self.config.conf_threshold,
+                target_classes=target_classes,
                 iou=self.config.iou_threshold,
-                persist=True,
-                verbose=False,
             )
         except Exception:
             return []
 
-        if not results or not results[0].boxes:
+        if not result or not result.boxes:
             return []
 
-        boxes = results[0].boxes
+        boxes = result.boxes
         if not hasattr(boxes, "id") or boxes.id is None:
             return []
 

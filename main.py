@@ -42,15 +42,34 @@ def run_live(config: PipelineConfig, camera_source: str):
     logger.info("Live mode started: %s", camera_source)
     pipeline = Pipeline(config, f"cam_{cam_id}")
     frame_id = 0
+    consecutive_failures = 0
+    max_failures = 5
 
     try:
         while _running:
             ret, frame = cap.read()
             if not ret:
-                logger.warning("Failed to read frame from %s, retrying...", camera_source)
-                time.sleep(0.5)
+                consecutive_failures += 1
+                logger.warning("Failed to read frame from %s (attempt %d/%d)", camera_source, consecutive_failures, max_failures)
+                if consecutive_failures >= max_failures:
+                    logger.warning("Reconnecting to %s...", camera_source)
+                    cap.release()
+                    cap = create_capture(camera_source)
+                    if cap is None:
+                        logger.error("Cannot reconnect to %s, retrying in 5s...", camera_source)
+                        time.sleep(5)
+                        cap = create_capture(camera_source)
+                        if cap is None:
+                            logger.error("Still cannot reconnect to %s", camera_source)
+                            time.sleep(5)
+                            consecutive_failures = 0
+                            continue
+                    consecutive_failures = 0
+                else:
+                    time.sleep(0.5)
                 continue
 
+            consecutive_failures = 0
             result = pipeline.process_frame(frame, frame_id)
             if result:
                 logger.info("[cam_%s] %s", cam_id, result)

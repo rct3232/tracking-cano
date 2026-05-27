@@ -8,22 +8,26 @@ load_dotenv()
 
 @dataclass
 class Thresholds:
-    speed_slow: float = 20.0
-    speed_fast: float = 40.0
-    overlap: float = 0.3
-    distance: float = 50.0
-    dash_threshold: float = 15.0
-    rotation_threshold: float = 45.0
-    hysteresis: float = 5.0
-    min_frames: int = 3
-    surge_min_frames: int = 2
+    speed_slow: float = field(default_factory=lambda: float(os.getenv("SPEED_SLOW", "20.0")))
+    speed_fast: float = field(default_factory=lambda: float(os.getenv("SPEED_FAST", "40.0")))
+    overlap: float = field(default_factory=lambda: float(os.getenv("OVERLAP", "0.3")))
+    distance: float = field(default_factory=lambda: float(os.getenv("DISTANCE", "50.0")))
+    dash_threshold: float = field(default_factory=lambda: float(os.getenv("DASH_THRESHOLD", "15.0")))
+    rotation_threshold: float = field(default_factory=lambda: float(os.getenv("ROTATION_THRESHOLD", "45.0")))
+    hysteresis: float = field(default_factory=lambda: float(os.getenv("HYSTERESIS", "5.0")))
+    min_frames: int = field(default_factory=lambda: int(os.getenv("MIN_FRAMES", "3")))
+    surge_min_frames: int = field(default_factory=lambda: int(os.getenv("SURGE_MIN_FRAMES", "2")))
 
 
 @dataclass
 class YOLOConfig:
     model_path: str = "yolo26s.pt"
-    conf_threshold: float = 0.25
-    iou_threshold: float = 0.70
+    conf_threshold: float = field(default_factory=lambda: float(os.getenv("CONF_THRESHOLD", "0.25")))
+    iou_threshold: float = field(default_factory=lambda: float(os.getenv("IOU_THRESHOLD", "0.70")))
+    tile_grid_x: int = field(default_factory=lambda: int(os.getenv("TILE_GRID_X", "2")))
+    tile_grid_y: int = field(default_factory=lambda: int(os.getenv("TILE_GRID_Y", "2")))
+    tile_overlap: int = field(default_factory=lambda: int(os.getenv("TILE_OVERLAP", "20")))
+    tile_enabled: bool = field(default_factory=lambda: os.getenv("TILE_ENABLED", "1") == "1")
 
 
 @dataclass

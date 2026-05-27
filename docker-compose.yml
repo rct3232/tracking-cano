@@ -1,5 +1,6 @@
 services:
   tracking-cano:
+    image: tracking-cano
     build:
       context: .
       dockerfile: Dockerfile
