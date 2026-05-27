@@ -1,11 +1,12 @@
 import logging
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 from core.pipeline import Pipeline
+from nlp.logger import SpaceLogger
 from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
@@ -73,10 +74,12 @@ def _make_pipeline_config(camera: CameraConfig) -> PipelineConfig:
 
 
 class Orchestrator:
-    def __init__(self, app_config: AppConfig):
+    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None):
         self.app_config = app_config
+        self.space_logger = space_logger
         self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
+        self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
 
     @property
     def spaces(self) -> list[SpaceConfig]:
@@ -90,30 +93,40 @@ class Orchestrator:
             self.add_camera(cam)
 
     def add_camera(self, camera: CameraConfig):
+        space_id = self._cam_to_space.get(camera.id)
         cap = create_capture(camera.source)
         if cap is None:
             logger.error("Cannot open camera %s from %s", camera.id, camera.source)
             return
         config = _make_pipeline_config(camera)
-        pipeline = Pipeline(config, camera.id)
+        pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
         stop_event = threading.Event()
         worker = _CameraWorker(camera.id, pipeline, cap, camera.source, stop_event)
         with self._lock:
             self._workers[camera.id] = worker
         worker.start()
-        logger.info("Camera %s started (%s)", camera.id, camera.source)
+        logger.info("Camera %s started (%s, space=%s)", camera.id, camera.source, space_id)
 
     def remove_camera(self, camera_id: str):
         with self._lock:
             worker = self._workers.pop(camera_id, None)
         if worker:
             worker.stop()
+        self._cam_to_space.pop(camera_id, None)
 
     def get_space_cameras(self, space_id: str) -> list[str]:
         for space in self.spaces:
             if space.id == space_id:
                 return space.camera_ids
         return []
+
+    def flush_spaces(self):
+        if not self.space_logger:
+            return
+        for space in self.spaces:
+            text = self.space_logger.flush(space.id, space.name)
+            if text:
+                logger.info("[%s] %s", space.id, text)
 
     def stop(self):
         with self._lock:
@@ -122,3 +135,11 @@ class Orchestrator:
             w.stop()
         self._workers.clear()
         logger.info("All cameras stopped")
+
+
+def _build_cam_to_space(app_config: AppConfig) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for space in app_config.spaces:
+        for cam_id in space.camera_ids:
+            mapping[cam_id] = space.id
+    return mapping

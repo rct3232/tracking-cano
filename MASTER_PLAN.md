@@ -30,7 +30,6 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 |------|------|
 | Object Detection | `ultralytics` — YOLO26 (yolo26s.pt 권장) |
 | Video Capture | `opencv-python-headless` |
-| Stream Broker | go2rtc (HTTP-MPEGTS) |
 | Object Tracking | `bytetrack` |
 | Movement + Interaction Analysis | `numpy` |
 | NLP Logging | OpenAI API 호환 LLM |
@@ -91,56 +90,59 @@ Camera B ─→ [YOLO26] → [ByteTrack] → [Spatial Analyzer] → [Interaction
 ## Phase 2 — 상호작용 감지 + 다중 카메라 + 동적 구성
 
 ### 2.1 공간·카메라 구성 시스템
-- [ ] `config/spaces.yaml` 스키마 설계
+- [x] `config/spaces.yaml` 스키마 설계
   - spaces: id, name, cameras[]
   - cameras: id, source, status, target_classes[]
   - thresholds: overlap, distance, speed_slow, speed_fast 등
   - llm: provider, model
-- [ ] `config_manager.py` — YAML 로드 + 유효성 검사
-- [ ] 구성 파일 변경 감지 (watchdog)
+- [x] `config_manager.py` — YAML 로드 + 유효성 검사
+- [x] 구성 파일 변경 감지 (watchdog)
 
 ### 2.2 go2rtc 스트림 자동 해결
-- [ ] `.env`에 `GO2RTC_URL=http://host:port` 설정
-- [ ] `source` 필드에 `go2rtc:스트림명` 형식 지원
-  - 예: `source: go2rtc:livingroom_cam` → `{GO2RTC_URL}/stream?src=livingroom_cam`
-- [ ] `utils/video.py` — `resolve_source()` 헬퍼
-  - `go2rtc:` 프리픽스 → HTTP-MPEGTS URL로 변환
-  - `rtsp://`, `http://`, 파일 경로 → 그대로 반환
-- [ ] `config_manager.py` — YAML 파싱 시 `resolve_source()` 자동 적용
+- [x] ~~`.env`에 `GO2RTC_URL=http://host:port` 설정~~ — **go2rtc 제거됨, RTSP 직접 사용**
+- [x] ~~`source` 필드에 `go2rtc:스트림명` 형식 지원~~ — **go2rtc 제거됨**
+- [x] ~~`utils/video.py` — `resolve_source()` 헬퍼~~ — **go2rtc 제거됨**
+- [x] ~~`config_manager.py` — YAML 파싱 시 `resolve_source()` 자동 적용~~ — **go2rtc 제거됨**
 
-### 2.2 상호작용 감지 모듈
-- [ ] `interaction_detector.py` — bbox 기반 상호작용 판단
-- [ ] 겹침 계산: 추적 대상 bbox ∩ 객체 bbox > overlap_threshold → "접촉"
-- [ ] 거리 계산: 중심점 간 거리 < distance_threshold → "근처"
-- [ ] 둘 다 만족 → "상호작용 중"
-- [ ] 상호작용 대상 클래스 필터 (couch, chair, dining table, tv 등)
+### 2.3 상호작용 감지 모듈
+- [x] `interaction_detector.py` — bbox 기반 상호작용 판단
+- [x] 겹침 계산: 추적 대상 bbox ∩ 객체 bbox > overlap_threshold → "접촉"
+- [x] 거리 계산: 중심점 간 거리 < distance_threshold → "근처"
+- [x] 둘 다 만족 → "상호작용 중"
+- [x] 상호작용 대상 클래스 필터 (couch, chair, dining table, tv 등)
 
-### 2.3 다중 카메라 오케스트레이터
-- [ ] `orchestrator.py` — N개 카메라 병렬 실행
-- [ ] 각 카메라별 독립 파이프라인 (pipeline.py 재사용)
-- [ ] 공간별 카메라 그룹핑
-- [ ] 실시간 + 오프라인 혼합 지원
+### 2.4 다중 카메라 오케스트레이터
+- [x] `orchestrator.py` — N개 카메라 병렬 실행
+- [x] 각 카메라별 독립 파이프라인 (pipeline.py 재사용)
+- [x] 공간별 카메라 그룹핑
+- [x] 실시간 + 오프라인 혼합 지원
 
-### 2.4 공간별 LLM 종합 로깅
-- [ ] 동일 공간의 여러 카메라 로그 수집
-- [ ] 통합 프롬프트: "[방: 거실] cam_01에서 ~, cam_02에서 ~"
-- [ ] LLM이 종합 자연어 표현 생성
-- [ ] 상태 변화 시점만 호출 (비용 최적화)
+### 2.5 공간별 LLM 종합 로깅
+- [x] 동일 공간의 여러 카메라 로그 수집 (SpaceLogger 클래스 구현)
+- [x] 통합 프롬프트: "[방: 거실] cam_01에서 ~, cam_02에서 ~"
+- [x] LLM이 종합 자연어 표현 생성
+- [ ] 상태 변화 시점만 호출 (비용 최적화) — **SpaceLogger flush 전략 보완 필요**
 
-### 2.5 핫리로드 구현
-- [ ] `config_manager.py` — 파일 감시 루프
-- [ ] 구성 변경 시 차분 계산:
-  - 추가된 카메라 → pipeline 시작
-  - 제거된 카메라 → pipeline 종료 + 리소스 정리
-  - 재할당된 카메라 → pipeline 공간 이동
-  - 추가된 공간 → LLM 컨텍스트 생성
-  - 삭제된 공간 → LLM 컨텍스트 정리
-- [ ] 안전한 전환 (실행 중인 프레임 처리 완료 후 적용)
+### 2.6 핫리로드 구현
+- [x] `config_manager.py` — 파일 감시 루프
+- [x] 구성 변경 시 차분 계산:
+  - [x] 추가된 카메라 → pipeline 시작
+  - [x] 제거된 카메라 → pipeline 종료 + 리소스 정리
+  - [ ] 재할당된 카메라 → pipeline 공간 이동
+  - [ ] 추가된 공간 → LLM 컨텍스트 생성
+  - [ ] 삭제된 공간 → LLM 컨텍스트 정리
+- [x] 안전한 전환 (실행 중인 프레임 처리 완료 후 적용)
 
-### 2.6 CLI 확장
-- [ ] `python main.py --live` — 구성 파일 기반 다중 카메라 실행
-- [ ] `python main.py --video <path>` — 단일 영상 모드 유지
-- [ ] 구성 파일 경로 옵션 (`--config <path>`)
+### 2.7 CLI 확장
+- [x] `python main.py --live` — 구성 파일 기반 다중 카메라 실행
+- [x] `python main.py --video <path>` — 단일 영상 모드 유지
+- [x] 구성 파일 경로 옵션 (`--config <path>`)
+
+### 2.8 미완성 — SpaceLogger 실제 연결
+- [ ] Orchestrator → Pipeline → SpaceLogger 연결
+- [ ] Pipeline에서 SpaceLogger.collect() 호출
+- [ ] SpaceLogger.flush() 주기적/이벤트 기반 전략
+- [ ] Hot-reload 시 공간 추가/삭제 처리
 
 ---
 
@@ -190,7 +192,7 @@ tracking-cano/
 │   └── spaces.yaml          # 동적 구성 파일 (Phase 2+)
 ├── core/
 │   ├── __init__.py
-│   ├── config_manager.py    # YAML 읽기 + go2rtc URL 해결 + watchdog 핫리로드
+│   ├── config_manager.py    # YAML 읽기 + watchdog 핫리로드
 │   ├── pipeline.py          # 단일 카메라 파이프라인
 │   └── orchestrator.py      # N개 카메라 병렬 + 공간별 그룹핑
 ├── modules/
@@ -198,18 +200,20 @@ tracking-cano/
 │   ├── detector.py          # YOLO26 감지 (다중 클래스)
 │   ├── tracker.py           # ByteTrack 추적
 │   ├── analyzer.py          # 이동 상태 분류
-│   └── interaction_detector.py  # bbox 상호작용 판단
+│   ├── interaction_detector.py  # bbox 상호작용 판단
+│   └── tile_detector.py     # 타일링 폴백 감지 (전체화면 실패 시)
 ├── nlp/
 │   ├── __init__.py
-│   └── logger.py            # LLM 자연어 로깅
+│   └── logger.py            # LLM 자연어 로깅 (NLPLogger + SpaceLogger)
 ├── utils/
 │   ├── __init__.py
-│   └── video.py             # go2rtc/RTSP/파일 소스 URL 해결 헬퍼
+│   └── video.py             # RTSP/파일 소스 캡처 헬퍼
 ├── logs/                    # 로그 출력 디렉토리
-├── .env                     # LLM API + GO2RTC_URL
+├── .env                     # LLM API 설정
 ├── .env.example             # 템플릿
 ├── .gitignore
 ├── requirements.txt
+├── PLAN.md                  # 현재 작업 계획
 └── MASTER_PLAN.md           # 이 파일
 ```
 
@@ -218,6 +222,6 @@ tracking-cano/
 ## 진행 상황
 
 - Phase 1: ✅ 완료 (1.2~1.8 구현)
-- Phase 2: ⬜ 시작 전
+- Phase 2: 🔄 거의 완료 (2.8 SpaceLogger 실제 연결 작업 중)
 - Phase 3: ⬜ 시작 전 (선택적)
 - Phase 4: ⬜ 시작 전 (선택적)
