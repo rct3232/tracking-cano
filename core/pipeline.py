@@ -3,6 +3,7 @@ from typing import List, Optional, Set
 
 from config.config import PipelineConfig
 from modules.analyzer import classify_movement
+from modules.interaction_detector import InteractionDetector, InteractionResult
 from modules.tracker import MovementState, Tracker, TrackedBBox
 from nlp.logger import NLPLogger
 
@@ -15,13 +16,17 @@ class Pipeline:
         self.camera_id = camera_id
         self.tracker = Tracker(config.yolo)
         self.nlp_logger = NLPLogger(config.llm)
+        self.interaction_detector = InteractionDetector(
+            overlap_threshold=config.thresholds.overlap,
+            distance_threshold=config.thresholds.distance,
+        )
         self._prev_states: dict[int, MovementState] = {}
         self._prev_frame_ids: dict[int, int] = {}
         self._state_hold: dict[int, int] = {}
 
     def process_frame(self, frame, frame_id: int) -> Optional[str]:
-        tracked_list = self.tracker.update(
-            frame, self.config.target_classes, frame_id
+        tracked_list, interaction_list = self.tracker.update(
+            frame, self.config.target_classes, frame_id, self.config.interaction_classes
         )
 
         if not tracked_list:
@@ -40,6 +45,8 @@ class Pipeline:
             state, meta = classify_movement(t, self.config.thresholds)
             t.state = state
             t.speed = meta["speed"]
+
+            interactions = self.interaction_detector.detect(t, interaction_list)
 
             is_new = t.prev_bbox is None
             if is_new:
@@ -62,7 +69,7 @@ class Pipeline:
 
             if prev_state != state:
                 if hold >= self.config.thresholds.min_frames:
-                    text = self.nlp_logger.log([t], self.camera_id)
+                    text = self.nlp_logger.log([t], self.camera_id, interactions)
                     if text:
                         results.append(text)
                     self._prev_states[t.track_id] = state

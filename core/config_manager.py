@@ -1,13 +1,13 @@
-"""Configuration manager — YAML loading, go2rtc URL resolution, hot-reload."""
+"""Configuration manager — YAML loading, hot-reload."""
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import yaml
 from dotenv import load_dotenv
-
-from utils.video import resolve_source
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileModifiedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,10 @@ DEFAULT_THRESHOLDS = {
     "distance": 50,
     "speed_slow": 20,
     "speed_fast": 40,
+    "dash_threshold": 15,
+    "rotation_threshold": 45,
+    "hysteresis": 5,
+    "min_frames": 3,
 }
 
 DEFAULT_LLM = {
@@ -30,12 +34,12 @@ DEFAULT_LLM = {
 class CameraConfig:
     """Single camera configuration with resolved source URL."""
 
-    def __init__(self, cfg: Dict[str, Any], go2rtc_url: Optional[str]):
-        raw_source = cfg.get("source", "")
+    def __init__(self, cfg: Dict[str, Any]):
         self.id: str = cfg["id"]
-        self.source: str = resolve_source(raw_source, go2rtc_url)
+        self.source: str = cfg.get("source", "")
         self.status: str = cfg.get("status", "active")
         self.target_classes: List[str] = cfg.get("target_classes", [])
+        self.interaction_classes: List[str] = cfg.get("interaction_classes", [])
 
     def __repr__(self) -> str:
         return f"CameraConfig(id={self.id!r}, source={self.source!r}, status={self.status!r})"
@@ -84,10 +88,9 @@ def load_config(
         Parsed AppConfig with resolved camera source URLs.
     """
     load_dotenv(dotenv_path=env_path, override=True)
-    go2rtc_url = _get_go2rtc_url()
 
     raw = _read_yaml(config_path)
-    cameras = _parse_cameras(raw, go2rtc_url)
+    cameras = _parse_cameras(raw)
     spaces = _parse_spaces(raw)
     thresholds = _parse_thresholds(raw)
     llm = _parse_llm(raw)
@@ -98,12 +101,6 @@ def load_config(
         len(spaces),
     )
     return AppConfig(cameras, spaces, thresholds, llm)
-
-def _get_go2rtc_url() -> Optional[str]:
-    """Read GO2RTC_URL from environment (loaded via .env)."""
-    import os
-    url = os.environ.get("GO2RTC_URL", "").strip()
-    return url if url else None
 
 def _read_yaml(path: str) -> Dict[str, Any]:
     """Read and parse a YAML file."""
@@ -116,7 +113,7 @@ def _read_yaml(path: str) -> Dict[str, Any]:
         raise ValueError(f"Config must be a YAML mapping, got {type(data).__name__}")
     return data
 
-def _parse_cameras(raw: Dict[str, Any], go2rtc_url: Optional[str]) -> List[CameraConfig]:
+def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
     """Parse the cameras list from raw config."""
     camera_list = raw.get("cameras", [])
     if not isinstance(camera_list, list):
@@ -131,7 +128,7 @@ def _parse_cameras(raw: Dict[str, Any], go2rtc_url: Optional[str]) -> List[Camer
         if cam_id in seen_ids:
             raise ValueError(f"Duplicate camera id: {cam_id}")
         seen_ids.add(cam_id)
-        cameras.append(CameraConfig(item, go2rtc_url))
+        cameras.append(CameraConfig(item))
     return cameras
 
 def _parse_spaces(raw: Dict[str, Any]) -> List[SpaceConfig]:
@@ -158,3 +155,97 @@ def _parse_llm(raw: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(DEFAULT_LLM)
     result.update(raw_llm)
     return result
+
+
+# ── Diff ────────────────────────────────────────────────────────────
+
+class ConfigDiff:
+    added_cameras: Set[str]
+    removed_cameras: Set[str]
+    added_spaces: Set[str]
+    removed_spaces: Set[str]
+
+    def __init__(self):
+        self.added_cameras = set()
+        self.removed_cameras = set()
+        self.added_spaces = set()
+        self.removed_spaces = set()
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.added_cameras or self.removed_cameras or self.added_spaces or self.removed_spaces)
+
+    def __repr__(self) -> str:
+        return (
+            f"ConfigDiff(added_cameras={self.added_cameras}, "
+            f"removed_cameras={self.removed_cameras}, "
+            f"added_spaces={self.added_spaces}, "
+            f"removed_spaces={self.removed_spaces})"
+        )
+
+
+def diff_configs(old: AppConfig, new: AppConfig) -> ConfigDiff:
+    old_cam_ids = {c.id for c in old.cameras}
+    new_cam_ids = {c.id for c in new.cameras}
+    old_space_ids = {s.id for s in old.spaces}
+    new_space_ids = {s.id for s in new.spaces}
+    diff = ConfigDiff()
+    diff.added_cameras = new_cam_ids - old_cam_ids
+    diff.removed_cameras = old_cam_ids - new_cam_ids
+    diff.added_spaces = new_space_ids - old_space_ids
+    diff.removed_spaces = old_space_ids - new_space_ids
+    return diff
+
+
+# ── Hot-reload ──────────────────────────────────────────────────────
+
+class ConfigWatcher:
+    def __init__(self, config_path: str, on_change: Callable[[AppConfig, ConfigDiff], None]):
+        self.config_path = Path(config_path)
+        self.on_change = on_change
+        self.observer = Observer()
+        self._last_config: Optional[AppConfig] = None
+
+    def start(self):
+        self._last_config = load_config(str(self.config_path))
+        self.observer.schedule(
+            _ConfigEventHandler(self.config_path, self._on_modified),
+            str(self.config_path.parent),
+            recursive=False,
+        )
+        self.observer.start()
+        logger.info("ConfigWatcher started for %s", self.config_path)
+
+    def stop(self):
+        self.observer.stop()
+        self.observer.join(timeout=3)
+        logger.info("ConfigWatcher stopped")
+
+    def get_current(self) -> AppConfig:
+        return self._last_config  # type: ignore[return-value]
+
+    def _on_modified(self):
+        try:
+            new_config = load_config(str(self.config_path))
+        except Exception as e:
+            logger.error("Failed to reload config: %s", e)
+            return
+        if self._last_config is None:
+            self._last_config = new_config
+            return
+        diff = diff_configs(self._last_config, new_config)
+        if diff.is_empty:
+            return
+        logger.info("Config change detected: %s", diff)
+        self._last_config = new_config
+        self.on_change(new_config, diff)
+
+
+class _ConfigEventHandler(FileSystemEventHandler):
+    def __init__(self, config_path: Path, callback: Callable[[], None]):
+        self.config_path = config_path
+        self._callback = callback
+
+    def on_modified(self, event: FileSystemEvent):
+        if isinstance(event, FileModifiedEvent) and Path(event.src_path) == self.config_path:
+            self._callback()

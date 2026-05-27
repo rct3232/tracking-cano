@@ -51,24 +51,25 @@ class Tracker:
                 enabled=self.config.tile_enabled,
             )
 
-    def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int) -> List[TrackedBBox]:
+    def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int, interaction_classes: List[str] | None = None) -> tuple[List[TrackedBBox], List[TrackedBBox]]:
+        all_classes = list(dict.fromkeys(target_classes + (interaction_classes or [])))
         self._ensure_loaded()
         try:
             result = self.detector.detect(
                 frame,
                 conf=self.config.conf_threshold,
-                target_classes=target_classes,
+                target_classes=all_classes,
                 iou=self.config.iou_threshold,
             )
         except Exception:
-            return []
+            return [], []
 
         if not result or not result.boxes:
-            return []
+            return [], []
 
         boxes = result.boxes
         if not hasattr(boxes, "id") or boxes.id is None:
-            return []
+            return [], []
 
         class_name_map = {
             0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 4: "airplane",
@@ -91,13 +92,11 @@ class Tracker:
             78: "hair drier", 79: "toothbrush",
         }
 
-        class_id_set = (
-            {k for k, v in class_name_map.items() if v in target_classes}
-            if target_classes
-            else set(class_name_map.keys())
-        )
+        target_id_set = {k for k, v in class_name_map.items() if v in target_classes} if target_classes else set()
+        interaction_id_set = {k for k, v in class_name_map.items() if v in (interaction_classes or [])}
 
         tracked: List[TrackedBBox] = []
+        interactions: List[TrackedBBox] = []
         current_ids: set[int] = set()
 
         for i in range(len(boxes.xyxy)):
@@ -106,7 +105,9 @@ class Tracker:
             conf = float(boxes.conf[i])
             cls_id = int(boxes.cls[i])
 
-            if cls_id not in class_id_set:
+            is_target = cls_id in target_id_set
+            is_interaction = cls_id in interaction_id_set
+            if not is_target and not is_interaction:
                 continue
 
             tb = TrackedBBox(
@@ -135,10 +136,13 @@ class Tracker:
                 tb.acceleration = tb.speed - tb.prev_speed
 
             current_ids.add(track_id)
-            tracked.append(tb)
+            if is_target:
+                tracked.append(tb)
+            if is_interaction:
+                interactions.append(tb)
 
-        self._history = {t.track_id: t for t in tracked}
-        return tracked
+        self._history = {t.track_id: t for t in tracked + interactions}
+        return tracked, interactions
 
     @staticmethod
     def _center(bbox: TrackedBBox) -> Tuple[float, float]:

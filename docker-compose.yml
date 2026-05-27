@@ -12,5 +12,5 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
-    command: ["--live", "${RTSP_URL}"]
+    command: ["--live"]
     restart: unless-stopped

@@ -10,7 +10,10 @@ import time
 import cv2
 
 from config.config import PipelineConfig
+from core.config_manager import ConfigWatcher, diff_configs
 from core.pipeline import Pipeline
+from core.orchestrator import Orchestrator
+from nlp.logger import SpaceLogger
 from utils.video import create_capture
 
 logging.basicConfig(
@@ -108,14 +111,41 @@ def run_video(config: PipelineConfig, video_path: str):
         cap.release()
 
 
+def run_multi(config_path: str):
+    from core.config_manager import load_config
+    app_config = load_config(config_path)
+    orchestrator = Orchestrator(app_config)
+    space_logger = SpaceLogger(PipelineConfig().llm)
+    orchestrator.start()
+    watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, new_cfg, diff))
+    watcher.start()
+    try:
+        while _running:
+            time.sleep(1)
+    finally:
+        watcher.stop()
+        orchestrator.stop()
+
+
+def _on_config_change(orchestrator: Orchestrator, new_config, diff):
+    for cam_id in diff.added_cameras:
+        cam = next((c for c in new_config.cameras if c.id == cam_id), None)
+        if cam:
+            orchestrator.add_camera(cam)
+    for cam_id in diff.removed_cameras:
+        orchestrator.remove_camera(cam_id)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tracking-Cano")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--live", type=str, help="Camera source (RTSP URL, e.g. rtsp://admin:pass@192.168.0.100:554/stream)")
+    group.add_argument("--live", nargs="?", const="", default=None,
+                       help="Camera source. No arg = multi-camera from config file. With arg = single camera (RTSP URL)")
     group.add_argument("--video", type=str, help="Offline video file path")
     parser.add_argument("--target-classes", nargs="+", default=["cat"], help="Target COCO classes")
     parser.add_argument("--model", default="yolo26s.pt", help="YOLO model path")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--config", default="config/spaces.yaml", help="Config file path (multi-camera mode)")
     args = parser.parse_args()
 
     config = PipelineConfig(
@@ -124,7 +154,9 @@ def main():
     config.yolo.model_path = args.model
     config.yolo.conf_threshold = args.conf
 
-    if args.live:
+    if args.live == "":
+        run_multi(args.config)
+    elif args.live:
         run_live(config, args.live)
     else:
         run_video(config, args.video)

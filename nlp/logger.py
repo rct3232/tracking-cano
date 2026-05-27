@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from openai import OpenAI
 
 from config.config import LLMConfig
+from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class NLPLogger:
                 api_key=self.config.api_key,
             )
 
-    def log(self, tracked_list: List[TrackedBBox], camera_id: str = "cam_01") -> Optional[str]:
+    def log(self, tracked_list: List[TrackedBBox], camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None) -> Optional[str]:
         if not tracked_list:
             return None
 
@@ -77,7 +78,7 @@ class NLPLogger:
         if not self.debouncer.should_call(debounce_key):
             return None
 
-        prompt = self._build_prompt(changes, timestamp, camera_id)
+        prompt = self._build_prompt(changes, timestamp, camera_id, interaction_results)
 
         try:
             response = self.client.chat.completions.create(
@@ -116,7 +117,7 @@ class NLPLogger:
             changes.append(change)
         return changes
 
-    def _build_prompt(self, changes: List[Dict], timestamp: str, camera_id: str) -> str:
+    def _build_prompt(self, changes: List[Dict], timestamp: str, camera_id: str, interaction_results: List[InteractionResult] | None = None) -> str:
         lines = [f"Timestamp: {timestamp}", f"Camera: {camera_id}", ""]
         lines.append("Tracked objects:")
 
@@ -131,6 +132,12 @@ class NLPLogger:
                     f"- ID:{c['track_id']}, Class:{c['class_name']}: "
                     f"State={state_str}, Speed={c['speed']:.0f}px"
                 )
+
+        if interaction_results:
+            lines.append("")
+            lines.append("Interactions:")
+            for ir in interaction_results:
+                lines.append(f"- ID:{ir.track_id}, Class:{ir.class_name}: {ir.relation_type} (distance={ir.distance})")
 
         lines.append("")
         lines.append("Describe the current state changes in one sentence.")
@@ -215,3 +222,68 @@ def _angle_to_direction(speed: float, angle: float) -> str:
         if lo <= angle < hi:
             return direction
     return "unknown"
+
+
+SPACE_SYSTEM_PROMPT = (
+    "You are an object behavior observation specialist. "
+    "Given observations from multiple cameras in the same space, "
+    "synthesize them into one concise, objective sentence describing the overall situation. "
+    "No emotions, no speculation. Output exactly ONE sentence."
+)
+
+
+class SpaceLogger:
+    def __init__(self, config: LLMConfig, log_dir: str = "logs"):
+        self.config = config
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
+        self.client: Optional[OpenAI] = None
+        self._buffer: Dict[str, Dict[str, str]] = {}
+
+    def _ensure_client(self):
+        if self.client is None and self.config.api_key:
+            self.client = OpenAI(
+                base_url=self.config.api_base_url,
+                api_key=self.config.api_key,
+            )
+
+    def collect(self, space_id: str, camera_id: str, text: str):
+        if space_id not in self._buffer:
+            self._buffer[space_id] = {}
+        self._buffer[space_id][camera_id] = text
+
+    def flush(self, space_id: str, space_name: str) -> Optional[str]:
+        entries = self._buffer.pop(space_id, {})
+        if not entries:
+            return None
+        self._ensure_client()
+        if self.client is None:
+            return None
+        if not self.debouncer.should_call(space_id):
+            return None
+        timestamp = datetime.now(timezone.utc).isoformat()
+        prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
+        for cam_id, text in sorted(entries.items()):
+            prompt_lines.append(f"- {cam_id}: {text}")
+        prompt_lines.append("")
+        prompt_lines.append("Synthesize these camera observations into one sentence.")
+        prompt = "\n".join(prompt_lines)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[
+                    {"role": "system", "content": SPACE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=150,
+                temperature=0.3,
+            )
+            text = response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error("Space LLM API call failed: %s", e)
+            return None
+        log_file = self.log_dir / f"{space_id}_{datetime.now().strftime('%Y%m%d')}.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {text}\n")
+        return text
