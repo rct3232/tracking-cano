@@ -64,11 +64,11 @@ class Tracker:
         except Exception:
             return [], []
 
-        if not result or not result.boxes:
+        if not result or result.boxes is None:
             return [], []
 
         boxes = result.boxes
-        if not hasattr(boxes, "id") or boxes.id is None:
+        if not hasattr(boxes, "id") or boxes.id is None or len(boxes.id) == 0:
             return [], []
 
         class_name_map = {

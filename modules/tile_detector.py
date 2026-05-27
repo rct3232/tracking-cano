@@ -13,7 +13,8 @@ class HybridDetector:
     def detect(self, frame: np.ndarray, conf: float, target_classes: List[str], iou: float = 0.70) -> object:
         target_class_ids = self._resolve_class_ids(target_classes)
         results = self.model.track(frame, conf=conf, iou=iou, persist=False, verbose=False)
-        if not results or not results[0].boxes or not results[0].boxes.id:
+        has_tracks = results and results[0].boxes is not None and results[0].boxes.id is not None and len(results[0].boxes.id) > 0
+        if not has_tracks:
             if self.enabled:
                 return self._tile_detect(frame, conf, target_class_ids, iou)
             return results[0] if results else None
@@ -57,7 +58,7 @@ class HybridDetector:
         return self._build_result(all_boxes, frame)
 
     def _has_target(self, boxes: object, target_class_ids: set) -> bool:
-        if not hasattr(boxes, "cls") or boxes.cls is None:
+        if not hasattr(boxes, "cls") or boxes.cls is None or len(boxes.cls) == 0:
             return False
         for cls_id in boxes.cls:
             if int(cls_id.item()) in target_class_ids:
