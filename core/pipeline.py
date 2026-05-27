@@ -25,6 +25,8 @@ class Pipeline:
         self._prev_states: dict[int, MovementState] = {}
         self._prev_frame_ids: dict[int, int] = {}
         self._state_hold: dict[int, int] = {}
+        self._prev_interactions: dict[int, List[InteractionResult]] = {}
+        self._class_names: dict[int, str] = {}
 
     def process_frame(self, frame, frame_id: int) -> Optional[str]:
         tracked_list, interaction_list = self.tracker.update(
@@ -32,38 +34,28 @@ class Pipeline:
         )
 
         if not tracked_list:
-            disappeared = self._check_disappeared(set())
-            for t_id, cls_name in disappeared:
-                text = self.nlp_logger.log_disappearance(t_id, cls_name, self.camera_id)
-                if text:
-                    self._collect(text)
-                return text
+            self._check_disappeared(set())
             return None
 
         current_ids: Set[int] = {t.track_id for t in tracked_list}
-        disappeared = self._check_disappeared(current_ids)
-        for t_id, cls_name in disappeared:
-                text = self.nlp_logger.log_disappearance(t_id, cls_name, self.camera_id)
-                if text:
-                    self._collect(text)
+        self._check_disappeared(current_ids)
 
         results: List[str] = []
         for t in tracked_list:
             state, meta = classify_movement(t, self.config.thresholds)
             t.state = state
             t.speed = meta["speed"]
+            t.direction_angle = meta["direction_angle"]
 
             interactions = self.interaction_detector.detect(t, interaction_list)
 
             is_new = t.prev_bbox is None
             if is_new:
-                text = self.nlp_logger.log_appearance(t, self.camera_id)
-                if text:
-                    results.append(text)
-                    self._collect(text)
                 self._prev_states[t.track_id] = state
                 self._prev_frame_ids[t.track_id] = frame_id
                 self._state_hold[t.track_id] = 1
+                self._prev_interactions[t.track_id] = interactions
+                self._class_names[t.track_id] = t.class_name
                 continue
 
             hold = self._state_hold.get(t.track_id, 0) + 1
@@ -73,6 +65,7 @@ class Pipeline:
             if prev_state is None:
                 self._prev_states[t.track_id] = state
                 self._prev_frame_ids[t.track_id] = frame_id
+                self._prev_interactions[t.track_id] = interactions
                 continue
 
             if prev_state != state:
@@ -84,9 +77,18 @@ class Pipeline:
                     self._prev_states[t.track_id] = state
                     self._prev_frame_ids[t.track_id] = frame_id
                     self._state_hold[t.track_id] = 0
+                    self._prev_interactions[t.track_id] = interactions
             else:
                 if hold >= self.config.thresholds.min_frames:
                     self._state_hold[t.track_id] = 0
+
+                prev_interactions = self._prev_interactions.get(t.track_id)
+                if self._interactions_changed(prev_interactions, interactions):
+                    text = self.nlp_logger.log([t], self.camera_id, interactions)
+                    if text:
+                        results.append(text)
+                        self._collect(text)
+                    self._prev_interactions[t.track_id] = interactions
 
         return " | ".join(results) if results else None
 
@@ -99,13 +101,19 @@ class Pipeline:
         disappeared = []
         for t_id in list(self._prev_states.keys()):
             if t_id not in current_ids:
-                cls_name = "unknown"
-                for t in self.tracker._history.values():
-                    if t.track_id == t_id:
-                        cls_name = t.class_name
-                        break
+                cls_name = self._class_names.get(t_id, "unknown")
                 disappeared.append((t_id, cls_name))
                 del self._prev_states[t_id]
                 self._prev_frame_ids.pop(t_id, None)
                 self._state_hold.pop(t_id, None)
+                self._prev_interactions.pop(t_id, None)
         return disappeared
+
+    def _interactions_changed(self, prev: List[InteractionResult] | None, curr: List[InteractionResult]) -> bool:
+        if prev is None:
+            return len(curr) > 0
+        if len(prev) != len(curr):
+            return True
+        prev_ids = {ir.track_id for ir in prev}
+        curr_ids = {ir.track_id for ir in curr}
+        return prev_ids != curr_ids

@@ -26,7 +26,10 @@ class InteractionDetector:
             dist = self._distance(target, obj)
             has_overlap = iou >= self.overlap_threshold
             has_proximity = dist <= self.distance_threshold
+            is_contained = dist == 0.0
             if has_overlap and has_proximity:
+                relation = "interacting"
+            elif is_contained:
                 relation = "interacting"
             elif has_overlap:
                 relation = "contact"
@@ -56,8 +59,6 @@ class InteractionDetector:
 
     @staticmethod
     def _distance(a: TrackedBBox, b: TrackedBBox) -> float:
-        ax = (a.x1 + a.x2) / 2
-        ay = (a.y1 + a.y2) / 2
-        bx = (b.x1 + b.x2) / 2
-        by = (b.y1 + b.y2) / 2
-        return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+        dx = max(0, max(b.x1 - a.x2, a.x1 - b.x2))
+        dy = max(0, max(b.y1 - a.y2, a.y1 - b.y2))
+        return (dx ** 2 + dy ** 2) ** 0.5

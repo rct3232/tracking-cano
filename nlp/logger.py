@@ -14,20 +14,25 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are an object behavior observation specialist. "
-    "Describe the movement and interactions of tracked objects in one concise, objective sentence. "
+    "Describe the movement of tracked objects in one concise, objective sentence. "
+    "Use natural expressions like 'moving left/right/up/down', 'rotating', "
+    "'moving quickly', 'moving slowly', 'stopped' — never use pixel values or numerical measurements. "
+    "If nearby objects are listed in the input, you MUST include them in your description. "
+    "Do not omit any nearby objects that are provided. "
+    "Never invent objects or relationships that are not in the input. "
     "No emotions, no speculation. Output exactly ONE sentence."
 )
 
 DIRECTION_MAP = {
-    (337.5, 360): "north",
-    (337.5, 22.5): "north",
-    (22.5, 67.5): "northeast",
-    (67.5, 112.5): "east",
-    (112.5, 157.5): "southeast",
-    (157.5, 202.5): "south",
-    (202.5, 247.5): "southwest",
-    (247.5, 292.5): "west",
-    (292.5, 337.5): "northwest",
+    (337.5, 360): "up",
+    (0, 22.5): "up",
+    (22.5, 67.5): "up and right",
+    (67.5, 112.5): "right",
+    (112.5, 157.5): "down and right",
+    (157.5, 202.5): "down",
+    (202.5, 247.5): "down and left",
+    (247.5, 292.5): "left",
+    (292.5, 337.5): "up and left",
 }
 
 
@@ -101,13 +106,14 @@ class NLPLogger:
     def _build_state_changes(self, tracked_list: List[TrackedBBox]) -> List[Dict]:
         changes = []
         for t in tracked_list:
+            direction_angle = getattr(t, "direction_angle", 0.0)
             change = {
                 "track_id": t.track_id,
                 "class_name": t.class_name,
                 "current_state": t.state,
                 "prev_state": None,
                 "speed": t.speed,
-                "direction": _angle_to_direction(t.speed, 0.0),
+                "direction": _angle_to_direction(t.speed, direction_angle),
             }
             if t.prev_bbox is not None:
                 change["prev_state"] = None
@@ -123,24 +129,29 @@ class NLPLogger:
 
         for c in changes:
             state_str = c["current_state"].name if c["current_state"] else "UNKNOWN"
+            direction = c.get("direction", "unknown")
             if c.get("is_new"):
                 lines.append(
-                    f"- ID:{c['track_id']}, Class:{c['class_name']}: APPEARED, State={state_str}"
+                    f"- {c['class_name']}: APPEARED"
                 )
             else:
+                movement = _state_to_movement(c["current_state"], direction)
                 lines.append(
-                    f"- ID:{c['track_id']}, Class:{c['class_name']}: "
-                    f"State={state_str}, Speed={c['speed']:.0f}px"
+                    f"- {c['class_name']}: {movement}"
                 )
 
         if interaction_results:
             lines.append("")
-            lines.append("Interactions:")
+            lines.append("Nearby objects (include these in your description):")
             for ir in interaction_results:
-                lines.append(f"- ID:{ir.track_id}, Class:{ir.class_name}: {ir.relation_type} (distance={ir.distance})")
+                rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
+                lines.append(f"- {ir.class_name}: {rel}")
 
         lines.append("")
-        lines.append("Describe the current state changes in one sentence.")
+        if interaction_results:
+            lines.append("Describe the state changes AND the object's relationship with nearby objects in one sentence.")
+        else:
+            lines.append("Describe the current state changes in one sentence.")
         return "\n".join(lines)
 
     def _save_log(self, text: str, timestamp: str, camera_id: str):
@@ -148,7 +159,7 @@ class NLPLogger:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
 
-    def log_appearance(self, tracked: TrackedBBox, camera_id: str = "cam_01") -> Optional[str]:
+    def log_appearance(self, tracked: TrackedBBox, camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None) -> Optional[str]:
         self._ensure_client()
         if self.client is None:
             return None
@@ -161,9 +172,14 @@ class NLPLogger:
         prompt = (
             f"Timestamp: {timestamp}\n"
             f"Camera: {camera_id}\n\n"
-            f"A {tracked.class_name} (ID:{tracked.track_id}) has appeared in the frame.\n\n"
-            "Describe this event in one sentence."
+            f"A {tracked.class_name} has appeared in the frame.\n"
         )
+        if interaction_results:
+            prompt += "\nInteractions with nearby objects:\n"
+            for ir in interaction_results:
+                rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
+                prompt += f"- {ir.class_name}: {rel}\n"
+        prompt += "\nDescribe this event including any object interactions in one sentence."
 
         try:
             response = self.client.chat.completions.create(
@@ -192,7 +208,7 @@ class NLPLogger:
         prompt = (
             f"Timestamp: {timestamp}\n"
             f"Camera: {camera_id}\n\n"
-            f"The {class_name} (ID:{track_id}) has disappeared from the frame.\n\n"
+            f"The {class_name} has disappeared from the frame.\n\n"
             "Describe this event in one sentence."
         )
 
@@ -222,6 +238,30 @@ def _angle_to_direction(speed: float, angle: float) -> str:
         if lo <= angle < hi:
             return direction
     return "unknown"
+
+
+def _state_to_movement(state, direction: str) -> str:
+    if state is None:
+        return "UNKNOWN"
+    name = state.name
+    if name == "STOPPED":
+        return "stopped"
+    if name == "ROTATING":
+        return "rotating"
+    if name == "DASHING":
+        return f"moving quickly {direction}" if direction not in ("stationary", "unknown") else "moving quickly"
+    if name == "FAST_MOVE":
+        return f"moving quickly {direction}" if direction not in ("stationary", "unknown") else "moving quickly"
+    if name == "SLOW_MOVE":
+        return f"moving slowly {direction}" if direction not in ("stationary", "unknown") else "moving slowly"
+    return "UNKNOWN"
+
+
+def _format_direction(direction: str) -> str:
+    """Simplify direction for natural language."""
+    if direction in ("stationary", "unknown"):
+        return ""
+    return direction
 
 
 SPACE_SYSTEM_PROMPT = (

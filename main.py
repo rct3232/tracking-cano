@@ -172,6 +172,7 @@ def main():
 
     config = PipelineConfig(
         target_classes=args.target_classes,
+        interaction_classes=["couch", "chair", "dining table", "tv", "bed"],
     )
     config.yolo.model_path = args.model
     config.yolo.conf_threshold = args.conf
