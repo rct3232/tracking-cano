@@ -37,5 +37,8 @@ logs/*.log
 config/*.yaml
 !config/*.example.yaml
 
+# Output
+output/
+
 # Docker
 docker-compose.override.yml

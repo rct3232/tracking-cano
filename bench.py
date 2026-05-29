@@ -33,6 +33,7 @@ SELECTED_CLASSES = TARGET_CLASSES + INTERACTION_CLASSES
 
 DATA_DIR = Path("data")
 DEFAULT_RUNTIME = 10
+_MODEL_PATH: str | None = None
 
 
 @dataclass
@@ -96,7 +97,7 @@ def _run_detect(video_path: str, runtime: int, yolo_classes: list | None, frame_
         return
 
     config = YOLOConfig()
-    config.model_path = config.model_path or "yolo26s.pt"
+    config.model_path = _MODEL_PATH or "yolo26s.pt"
     config.yolo_classes = yolo_classes
     tracker = Tracker(config)
 
@@ -130,7 +131,7 @@ def _run_detect_sequential(video_path: str, runtime: int, yolo_classes: list | N
         return (0, 0, 0, 0)
 
     config = YOLOConfig()
-    config.model_path = config.model_path or "yolo26s.pt"
+    config.model_path = _MODEL_PATH or "yolo26s.pt"
     config.yolo_classes = yolo_classes
     tracker = Tracker(config)
 
@@ -163,7 +164,7 @@ def _run_full(video_path: str, runtime: int, frame_skip: int, full_video: bool, 
         return
 
     yolo_config = YOLOConfig()
-    yolo_config.model_path = yolo_config.model_path or "yolo26s.pt"
+    yolo_config.model_path = _MODEL_PATH or "yolo26s.pt"
     config = PipelineConfig(
         target_classes=TARGET_CLASSES,
         interaction_classes=INTERACTION_CLASSES,
@@ -201,7 +202,7 @@ def _run_full_sequential(video_path: str, runtime: int, frame_skip: int, full_vi
         return (0, 0, 0, 0)
 
     yolo_config = YOLOConfig()
-    yolo_config.model_path = yolo_config.model_path or "yolo26s.pt"
+    yolo_config.model_path = _MODEL_PATH or "yolo26s.pt"
     config = PipelineConfig(
         target_classes=TARGET_CLASSES,
         interaction_classes=INTERACTION_CLASSES,
@@ -245,7 +246,7 @@ def _run_memory(video_path: str, runtime: int, yolo_classes: list | None, label:
         return
 
     config = YOLOConfig()
-    config.model_path = config.model_path or "yolo26s.pt"
+    config.model_path = _MODEL_PATH or "yolo26s.pt"
     config.yolo_classes = yolo_classes
     tracemalloc.start()
     tracker = Tracker(config)
@@ -582,8 +583,7 @@ def main():
     compare_classes = SELECTED_CLASSES if args.compare_classes == ["sel"] else args.compare_classes
 
     if args.model:
-        import config.config as _cc
-        _cc.YOLOConfig.model_path = args.model
+        _MODEL_PATH = args.model
 
     # --- Config-based mode ---
     if args.config:

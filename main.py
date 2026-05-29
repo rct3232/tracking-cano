@@ -114,12 +114,12 @@ def run_video(config: PipelineConfig, video_path: str):
         cap.release()
 
 
-def run_multi(config_path: str):
+def run_multi(config_path: str, model_path: str | None = None):
     from core.config_manager import load_config
     app_config = load_config(config_path)
     max_cameras = max((len(s.camera_ids) for s in app_config.spaces), default=1)
     space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras)
-    orchestrator = Orchestrator(app_config, space_logger)
+    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path)
     orchestrator.start()
     watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
     watcher.start()
@@ -187,7 +187,7 @@ def main():
     config.yolo.conf_threshold = args.conf
 
     if args.live == "":
-        run_multi(args.config)
+        run_multi(args.config, model_path=args.model)
     elif args.live:
         run_live(config, args.live)
     else:

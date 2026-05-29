@@ -120,7 +120,7 @@ class _CameraWorker:
                 self.on_finished(self.camera_id)
 
 
-def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] = None) -> PipelineConfig:
+def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] = None, default_model_path: Optional[str] = None) -> PipelineConfig:
     thresholds = Thresholds()
     llm = LLMConfig()
     if app_config:
@@ -130,7 +130,7 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
         for yaml_key, llm_attr in _KEY_MAP.items():
             if yaml_key in app_config.llm:
                 setattr(llm, llm_attr, app_config.llm[yaml_key])
-    model_path = camera.model_path or f"yolo26{camera.model_size}.pt"
+    model_path = camera.model_path or default_model_path or f"yolo26{camera.model_size}.pt"
     yolo = YOLOConfig(
         model_size=camera.model_size,
         model_path=model_path,
@@ -152,9 +152,10 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
 
 
 class Orchestrator:
-    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None):
+    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None, default_model_path: Optional[str] = None):
         self.app_config = app_config
         self.space_logger = space_logger
+        self._default_model_path = default_model_path
         self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
         self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
@@ -184,7 +185,7 @@ class Orchestrator:
         if cap is None:
             logger.error("Cannot open camera %s from %s", camera.id, camera.source)
             return
-        config = _make_pipeline_config(camera, self.app_config)
+        config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
         pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
         stop_event = threading.Event()
         worker = _CameraWorker(
