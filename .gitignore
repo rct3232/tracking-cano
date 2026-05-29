@@ -34,7 +34,8 @@ logs/*.log
 *.avi
 
 # Config (민감 정보 포함)
-config/spaces.yaml
+config/*.yaml
+!config/*.example.yaml
 
 # Docker
 docker-compose.override.yml

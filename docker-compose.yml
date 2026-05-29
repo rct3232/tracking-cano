@@ -8,11 +8,11 @@ services:
     env_file:
       - .env
     environment:
-      - RTSP_URL=${RTSP_URL}
       - OMP_NUM_THREADS=1
       - MKL_NUM_THREADS=1
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
+      - ./output:/app/output
     command: ["python", "main.py", "--live"]
     restart: unless-stopped

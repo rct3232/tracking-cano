@@ -180,12 +180,14 @@ python bench_rtsp.py --runtime 10 --frame-skip 15
 | `--frame-skip <N>` | 프레임 스킵 (N프레임마다 1회 추론, 기본: 15) |
 | `--config <path>` | 설정 파일 경로 (기본: `config/spaces.yaml`) |
 
-### 로컬 영상 벤치마크 (`benchmark.py`)
+### 로컬 영상 벤치마크 (`benchmark.py`, `bench_10s.py`)
 
-`data/` 디렉토리의 영상으로 처리 가능한 프레임 수를 측정합니다.
+`benchmark.py`는 `data/` 디렉토리의 영상으로 처리 가능한 프레임 수를 측정합니다.
+`bench_10s.py`는 고정 10초 실행 벤치마크로, `Dockerfile.bench`의 기본 진입점입니다.
 
 ```bash
 python benchmark.py
+python bench_10s.py --runtime 10 --frame-skip 15
 ```
 
 ---

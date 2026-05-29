@@ -38,8 +38,11 @@ class CameraConfig:
         self.id: str = cfg["id"]
         self.source: str = cfg.get("source", "")
         self.status: str = cfg.get("status", "active")
-        self.target_classes: List[str] = cfg.get("target_classes", [])
-        self.interaction_classes: List[str] = cfg.get("interaction_classes", [])
+        target = cfg.get("target_classes")
+        if not target:
+            raise ValueError(f"Camera '{cfg['id']}': 'target_classes' is required")
+        self.target_classes: List[str] = target
+        self.interaction_classes: Optional[List[str]] = cfg.get("interaction_classes", None)
         self.model_size: str = cfg.get("model_size", "s")
         self.model_path: Optional[str] = cfg.get("model_path", None)
         self.quantize: bool = cfg.get("quantize", False)

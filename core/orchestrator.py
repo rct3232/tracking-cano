@@ -5,6 +5,8 @@ from typing import Callable, Dict, Optional
 
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
+
+_KEY_MAP = {"api_endpoint": "api_base_url", "model": "model_name", "temperature": "temperature"}
 from core.pipeline import Pipeline
 from nlp.logger import SpaceLogger
 from utils.video import create_capture
@@ -99,7 +101,7 @@ class _CameraWorker:
                 now = time.perf_counter()
                 if now - last_fps_log >= fps_log_interval:
                     fps = fps_frame_count / (now - last_fps_log)
-                    logger.info("[CAM FPS] %s frame=%d fps=%.1f", self.camera_id, frame_id, fps)
+                    logger.debug("[CAM FPS] %s frame=%d fps=%.1f", self.camera_id, frame_id, fps)
                     fps_frame_count = 0
                     last_fps_log = now
 
@@ -118,9 +120,16 @@ class _CameraWorker:
                 self.on_finished(self.camera_id)
 
 
-def _make_pipeline_config(camera: CameraConfig) -> PipelineConfig:
+def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] = None) -> PipelineConfig:
     thresholds = Thresholds()
     llm = LLMConfig()
+    if app_config:
+        for k, v in app_config.thresholds.items():
+            if hasattr(thresholds, k):
+                setattr(thresholds, k, v)
+        for yaml_key, llm_attr in _KEY_MAP.items():
+            if yaml_key in app_config.llm:
+                setattr(llm, llm_attr, app_config.llm[yaml_key])
     model_path = camera.model_path or f"yolo26{camera.model_size}.pt"
     yolo = YOLOConfig(
         model_size=camera.model_size,
@@ -128,8 +137,11 @@ def _make_pipeline_config(camera: CameraConfig) -> PipelineConfig:
         quantize=camera.quantize,
         frame_skip=camera.frame_skip,
     )
-    all_classes = list(dict.fromkeys(camera.target_classes + camera.interaction_classes))
-    yolo.yolo_classes = all_classes if all_classes else None
+    if camera.interaction_classes is None:
+        yolo.yolo_classes = None
+    else:
+        all_classes = list(dict.fromkeys(camera.target_classes + camera.interaction_classes))
+        yolo.yolo_classes = all_classes if all_classes else None
     return PipelineConfig(
         target_classes=camera.target_classes,
         interaction_classes=camera.interaction_classes,
@@ -172,7 +184,7 @@ class Orchestrator:
         if cap is None:
             logger.error("Cannot open camera %s from %s", camera.id, camera.source)
             return
-        config = _make_pipeline_config(camera)
+        config = _make_pipeline_config(camera, self.app_config)
         pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
         stop_event = threading.Event()
         worker = _CameraWorker(

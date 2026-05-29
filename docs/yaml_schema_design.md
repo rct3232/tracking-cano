@@ -16,7 +16,7 @@ llm:          # 객체  — LLM 설정 (선택적, 디폴트 존재)
 ```
 
 - 허용되지 않는 최상위 키는 무시하며 경고 로그 출력
-- `cameras` 배열은 최소 1개 이상이어야 함
+- `cameras` 배열은 최소 1개 이상이어야 함 (단, 현재 코드는 미검증)
 
 ---
 
@@ -27,14 +27,14 @@ llm:          # 객체  — LLM 설정 (선택적, 디폴트 존재)
 | 필드 | 타입 | 필수 여부 | 디폴트 | 설명 |
 |------|------|-----------|--------|------|
 | `id` | string | ✅ | — | 공간 고유 식별자 |
-| `name` | string | ✅ | — | 표시용 이름 (한글/영어 모두 허용) |
+| `name` | string | ❌ | `id` 값과 동일 | 표시용 이름 (한글/영어 모두 허용) |
 | `cameras` | array[string] | ✅ | — | 소속 카메라 ID 목록 |
 
 ### 3.2 유효성 규칙
 
 - **`id` 형식:** `[a-z][a-z0-9_]*` 패턴 권장, 중복 금지
 - **`name`:** 한글/영어 모두 허용 (표시용이므로 제약 없음)
-- **`cameras`:** 배열 내 ID는 최상위 `cameras`에 반드시 존재해야 함 (참조 무결성)
+- **`cameras`:** 배열 내 ID는 최상위 `cameras`에 반드시 존재해야 함 (참조 무결성 — 단, 현재 코드는 미검증)
 - **1대1 매핑:** 동일한 카메라 ID가 여러 space의 `cameras`에 중복 포함될 수 없음
 
 ### 3.3 예시
@@ -151,7 +151,7 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 | 필드 | 타입 | 필수 여부 | 디폴트 | 설명 |
 |------|------|-----------|--------|------|
 | `provider` | enum | ❌ | `"openai"` | LLM 제공자 |
-| `model` | string | ✅ | — | 사용할 모델 ID |
+| `model` | string | ❌ | `gpt-4o-mini` | 사용할 모델 ID (env `MODEL_NAME` 우선) |
 | `api_endpoint` | string | ❌ | `https://api.openai.com/v1` | API 엔드포인트 URL |
 | `temperature` | float | ❌ | `0.7` | 생성 온도 |
 
@@ -160,10 +160,12 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 - `"openai"` — OpenAI 호환 API
 - 추가 제공자 확장 가능성: `"anthropic"`, `"gemini"` 등 (향후)
 
-### 6.3 api_endpoint 유효성 검사
+### 6.3 api_endpoint / api_base_url
 
+- YAML 키: `api_endpoint` (LLMConfig 키: `api_base_url`로 자동 매핑)
 - `https://` 또는 `http://` 프리픽스 필수
 - `/v1` 경로 포함 권장 (OpenAI 호환 형식)
+- env var `API_BASE_URL`도 동일한 역할 (YAML 값이 우선)
 
 ### 6.4 API key 관리
 
@@ -185,7 +187,7 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 1. 최상위 키 외의 키는 무시 (경고 로그 출력)
 2. `spaces`와 `cameras` 배열 내 `id` 중복 금지 — 에러 발생 시 프로그램 종료
 3. space의 `cameras` 참조가 실제 존재하는 camera id인지 검증 — 참조 무결성 에러
-4. `cameras` 배열은 최소 1개 이상이어야 함
+4. `cameras` 배열은 최소 1개 이상이어야 함 (단, 현재 코드는 미검증)
 
 ### 7.2 타입 강제
 

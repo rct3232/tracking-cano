@@ -79,13 +79,16 @@ class Tracker:
             logger.info("Model loaded: %s (quantize=%s)", self.config.model_path, self.config.quantize)
 
     def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int, interaction_classes: List[str] | None = None) -> tuple[List[TrackedBBox], List[TrackedBBox]]:
-        all_classes = list(dict.fromkeys(target_classes + (interaction_classes or [])))
+        if interaction_classes is None:
+            all_classes = None  # YOLO 전체 80클래스 감지
+        else:
+            all_classes = list(dict.fromkeys(target_classes + (interaction_classes or [])))
         self._ensure_loaded()
         try:
             result = self.detector.detect(
                 frame,
                 conf=self.config.conf_threshold,
-                target_classes=all_classes,
+                target_classes=all_classes or target_classes,
                 iou=self.config.iou_threshold,
             )
         except Exception as e:
@@ -103,7 +106,12 @@ class Tracker:
 
         class_name_map = self._CLASS_NAME_MAP
         target_id_set = {k for k, v in class_name_map.items() if v in target_classes} if target_classes else set()
-        interaction_id_set = {k for k, v in class_name_map.items() if v in (interaction_classes or [])}
+        if interaction_classes is None:
+            interaction_id_set = set(class_name_map.keys())  # COCO 80 전체
+        elif interaction_classes:
+            interaction_id_set = {k for k, v in class_name_map.items() if v in interaction_classes}
+        else:
+            interaction_id_set = set()  # [] → interaction 없음
 
         tracked: List[TrackedBBox] = []
         interactions: List[TrackedBBox] = []

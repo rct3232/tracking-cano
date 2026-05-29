@@ -28,7 +28,5 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 | `utils/video.py` | `create_capture()`, `resolve_source()` |
 
 ## Gotchas (2026-05 기준)
-- go2rtc 제거됨. `GO2RTC_URL`은 `.env.example`에만 남은 dead config
 - `--multi` 플래그 없음. `--live` 단독 인자 = multi mode
-- `SURGE_MIN_FRAMES`: config.py에 있으나 `.env.example` 누락됨 (주의, config.py에도 기본값 2로 하드코딩)
 - 타입 힌트 혼용 중: `Optional[str]`(old) vs `str \| None`(new). 기존 파일 스타일 유지

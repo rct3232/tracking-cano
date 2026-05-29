@@ -1,6 +1,8 @@
 import logging
 from typing import List, Optional, Set
 
+import numpy as np
+
 from config.config import PipelineConfig
 from modules.analyzer import classify_movement
 from modules.interaction_detector import InteractionDetector, InteractionResult
@@ -28,7 +30,7 @@ class Pipeline:
         self._prev_interactions: dict[int, List[InteractionResult]] = {}
         self._class_names: dict[int, str] = {}
 
-    def process_frame(self, frame, frame_id: int) -> Optional[str]:
+    def process_frame(self, frame: np.ndarray, frame_id: int) -> Optional[str]:
         tracked_list, interaction_list = self.tracker.update(
             frame, self.config.target_classes, frame_id, self.config.interaction_classes
         )
@@ -72,7 +74,7 @@ class Pipeline:
             if prev_state != state:
                 logger.debug("[%s] target %d state %s->%s hold=%d/%d", self.camera_id, t.track_id, prev_state.name, state.name, hold, self.config.thresholds.min_frames)
                 if hold >= self.config.thresholds.min_frames:
-                    self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
+                    self.nlp_logger.log([t], frame, self.camera_id, interactions, self.space_logger, self.space_id)
                     results.append(self._state_summary(t))
                     self._prev_states[t.track_id] = state
                     self._prev_frame_ids[t.track_id] = frame_id
@@ -85,7 +87,7 @@ class Pipeline:
                 prev_interactions = self._prev_interactions.get(t.track_id)
                 if self._interactions_changed(prev_interactions, interactions):
                     logger.debug("[%s] target %d interactions changed", self.camera_id, t.track_id)
-                    self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
+                    self.nlp_logger.log([t], frame, self.camera_id, interactions, self.space_logger, self.space_id)
                     results.append(self._state_summary(t))
                     self._prev_interactions[t.track_id] = interactions
 

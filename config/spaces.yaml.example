@@ -1,16 +1,16 @@
 # === 카메라 설정 (필수) ===
 cameras:
   - id: livingroom
-    source: go2rtc:livingroom_cam               # go2rtc:스트림명 형식 (GO2RTC_URL /stream?src=... 로 자동 변환)
-    status: active                              # active | inactive
-    target_classes: [cat, person]               # COCO 클래스명
+    source: rtsp://admin:admin@192.168.0.100:554/stream   # RTSP URL
+    status: active                                          # active | inactive
+    target_classes: [cat, person]                           # COCO 클래스명
   - id: hallway
-    source: go2rtc:hallway_cam
+    source: rtsp://admin:admin@192.168.0.101:554/stream
     status: active
     target_classes: [person]
-  # 직접 RTSP 사용 예시:
+  # 직접 파일 사용 예시:
   # - id: cam_03
-  #   source: rtsp://192.168.0.100:554/stream1
+  #   source: data/sample.mp4
   #   status: active
   #   target_classes: [cat]
 

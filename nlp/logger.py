@@ -1,3 +1,4 @@
+import base64
 import logging
 import queue
 import threading
@@ -7,11 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
 from openai import OpenAI
 
 from config.config import LLMConfig
 from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
+from utils.image import annotate_image
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ class _LogTask:
     tracked_list: List[TrackedBBox]
     camera_id: str
     interaction_results: List[InteractionResult] | None
+    image_b64: Optional[str] = None
     space_logger: Optional['SpaceLogger'] = None
     space_id: Optional[str] = None
 
@@ -63,10 +67,11 @@ class LLMCallDebouncer:
 
 
 class NLPLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs"):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", output_dir: str = "/output"):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = Path(output_dir)
         self.debouncer = LLMCallDebouncer(config.cooldown_seconds)
         self.client: Optional[OpenAI] = None
         self._queue = queue.Queue()
@@ -81,7 +86,18 @@ class NLPLogger:
                 api_key=self.config.api_key,
             )
 
-    def log(self, tracked_list: List[TrackedBBox], camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None, space_logger: Optional['SpaceLogger'] = None, space_id: Optional[str] = None) -> Optional[str]:
+    def _save_image(self, image_b64: str, camera_id: str):
+        try:
+            cam_dir = self.output_dir / camera_id
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filepath = cam_dir / f"{timestamp}.jpg"
+            image_bytes = base64.b64decode(image_b64)
+            filepath.write_bytes(image_bytes)
+        except Exception as e:
+            logger.error("Image save failed for %s: %s", camera_id, e)
+
+    def log(self, tracked_list: List[TrackedBBox], frame: np.ndarray, camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None, space_logger: Optional['SpaceLogger'] = None, space_id: Optional[str] = None) -> Optional[str]:
         if not tracked_list:
             return None
         self._ensure_client()
@@ -91,8 +107,12 @@ class NLPLogger:
         if not self.debouncer.should_call(debounce_key):
             logger.debug("[logger] debounce suppress: %s", debounce_key)
             return None
-        self._queue.put(_LogTask(tracked_list, camera_id, interaction_results, space_logger, space_id))
-        logger.debug("[logger] enqueue: %s (qsize=%d)", debounce_key, self._queue.qsize())
+        image_b64 = None
+        if self.config.vision_enabled:
+            image_b64 = annotate_image(frame, tracked_list, quality=self.config.vision_quality, max_width=self.config.vision_max_width)
+            self._save_image(image_b64, camera_id)
+        self._queue.put(_LogTask(tracked_list, camera_id, interaction_results, image_b64, space_logger, space_id))
+        logger.debug("[logger] enqueue: %s (qsize=%d, vision=%s)", debounce_key, self._queue.qsize(), "on" if image_b64 else "off")
         return None
 
     def stop(self):
@@ -115,11 +135,18 @@ class NLPLogger:
         prompt = self._build_prompt(changes, timestamp, task.camera_id, task.interaction_results)
         logger.debug("[logger] LLM call: camera=%s prompt=%d chars", task.camera_id, len(prompt))
         try:
+            if task.image_b64:
+                content = [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{task.image_b64}"}},
+                ]
+            else:
+                content = prompt
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": content},
                 ],
                 max_tokens=150,
                 temperature=0.3,

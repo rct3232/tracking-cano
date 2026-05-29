@@ -11,62 +11,69 @@
 ### 2.1 역할 정의
 
 ```python
-SYSTEM_PROMPT = """
-You are an object behavior observation specialist. Your task is to describe the movement and interactions of tracked objects in a concise, objective manner.
-
-Rules:
-- Output exactly ONE sentence per state change event.
-- Use objective language only. No emotions, no speculation.
-- Do NOT include information that was not provided.
-- If multiple changes occur, combine them into a single coherent sentence.
-"""
+SYSTEM_PROMPT = (
+    "You are an object behavior observation specialist. "
+    "Describe the movement of tracked objects in one concise, objective sentence. "
+    "Use natural expressions like 'moving left/right/up/down', 'rotating', "
+    "'moving quickly', 'moving slowly', 'stopped' — never use pixel values or numerical measurements. "
+    "If nearby objects are listed in the input, you MUST include them in your description. "
+    "Do not omit any nearby objects that are provided. "
+    "Never invent objects or relationships that are not in the input. "
+    "No emotions, no speculation. Output exactly ONE sentence."
+)
 ```
 
 ### 2.2 출력 형식 제약
 
 - **한 문장 강제:** 상태 변화가 복합적일 경우에도 단일 문장으로 통합
-- **금지 사항:** 추측 ("아마", "probably"), 감정어, 확인되지 않은 정보
-- **길이 제한:** 최대 150자 권장 (토큰 절약)
+- **금지 사항:** 추측, 감정어, 확인되지 않은 정보
+- **길이 제한:** 최대 150 tokens (`max_tokens=150`)
 
 ### 2.3 언어 선택 기준
 
 - 기본 언어: 한국어 (`ko`)
-- `config/spaces.yaml`에서 `llm.language` 필드로 공간별/전역 설정 가능
-- 허용 값: `ko`, `en`
+- `LLMConfig.language` 필드로 설정 가능 (`ko`, `en`)
+- 현재는 YAML/env var에서 설정 불가 — `config/config.py`에서 직접 변경 필요
 
 ---
 
 ## 3. 단일 카메라 상태 보고용 프롬프트 템플릿
 
-### 3.1 템플릿 구조
+### 3.1 템플릿 구조 (실제 logger.py `_build_prompt()`)
 
 ```python
-USER_PROMPT_TEMPLATE = """
-Timestamp: {timestamp}
-Camera: {camera_id}
-Space: {space_name}
-
-Tracked objects:
-{object_states}
-
-Previous states (N frames ago):
-{previous_states}
-
-Describe the current state changes in one sentence.
-"""
+def _build_prompt(self, changes, timestamp, camera_id, interaction_results=None):
+    lines = [f"Timestamp: {timestamp}", f"Camera: {camera_id}", ""]
+    lines.append("Tracked objects:")
+    for c in changes:
+        if c.get("is_new"):
+            lines.append(f"- {c['class_name']}: APPEARED")
+        else:
+            movement = _state_to_movement(c["current_state"], c.get("direction", "unknown"))
+            lines.append(f"- {c['class_name']}: {movement}")
+    if interaction_results:
+        lines.append("")
+        lines.append("Nearby objects (include these in your description):")
+        for ir in interaction_results:
+            rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
+            lines.append(f"- {ir.class_name}: {rel}")
+    lines.append("")
+    lines.append("Describe the state changes AND the object's relationship with nearby objects in one sentence.")
+    return "\n".join(lines)
 ```
 
 ### 3.2 데이터 주입 형식
 
-**`{object_states}` — 현재 상태 블록:**
+**Tracked objects 블록:**
 ```
-- ID:{track_id}, Class:{class_name}: State={movement_state}, Speed={speed}px, Direction={direction}
-  Interaction: {interaction_type} with {target_class}
+- {class_name}: {movement_description}
+- {class_name}: APPEARED
 ```
 
-**`{previous_states}` — 이전 상태 블록:**
+**Nearby objects 블록 (interaction 있을 때만):**
 ```
-- ID:{track_id}: State={prev_movement_state}, Interaction={prev_interaction_type}
+- {class_name}: touching
+- {class_name}: near
 ```
 
 ### 3.3 예시 렌더링 결과
@@ -74,44 +81,41 @@ Describe the current state changes in one sentence.
 ```
 Timestamp: 2025-01-15T14:30:22.123Z
 Camera: cam_01
-Space: 거실
 
 Tracked objects:
-- ID:3, Class:cat: State=FAST_MOVE, Speed=45px, Direction=northeast
-  Interaction: NEARBY with couch
+- cat: moving slowly up and right
 
-Previous states (5 frames ago):
-- ID:3: State=SLOW_MOVE, Interaction=NONE
+Nearby objects (include these in your description):
+- couch: touching
 
-Describe the current state changes in one sentence.
+Describe the state changes AND the object's relationship with nearby objects in one sentence.
 ```
 
-**기대 응답:** "거실 cam_01에서 고양이(ID:3)가 소파 근처로 빠르게 이동하며 속도가 빨라졌다."
+### 3.4 참고: 이전 상태(prev_state) 전달
+
+현재 `_build_state_changes()`에서 `prev_state`는 항상 `None`으로 설정된다 (logger.py 버그). 이는 Pipeline의 `_prev_states`가 NLPLogger에 전달되지 않기 때문이며, PLAN.md에 별도 수정 작업으로 등록되어 있다.
 
 ---
 
 ## 4. 다중 카메라 공간별 종합 프롬프트 템플릿
 
-### 4.1 템플릿 구조
+### 4.1 템플릿 구조 (실제 SpaceLogger.flush())
 
 ```python
-MULTI_CAMERA_PROMPT_TEMPLATE = """
-Space: {space_name}
-Timestamp: {timestamp}
-
-Camera reports:
-{camera_reports}
-
-Synthesize the information from multiple cameras in this space into one coherent summary sentence.
-"""
+prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
+for cam_id, texts in sorted(entries.items()):
+    for t in texts:
+        prompt_lines.append(f"- {cam_id}: {t}")
+prompt_lines.append("")
+prompt_lines.append("Synthesize these camera observations into one sentence.")
+prompt = "\n".join(prompt_lines)
 ```
 
 ### 4.2 데이터 주입 형식
 
-**`{camera_reports}` — 각 카메라별 개별 보고:**
+**Camera reports 형식:**
 ```
-cam_01: {single_camera_llm_response_1}
-cam_02: {single_camera_llm_response_2}
+- {camera_id}: {single_camera_llm_response}
 ```
 
 ### 4.3 예시 렌더링 결과
@@ -129,11 +133,11 @@ Synthesize the information from multiple cameras in this space into one coherent
 
 **기대 응답:** "거실에서 두 마리의 고양이가 동시에 활동하기 시작했으며, 하나는 소파 쪽으로 빠르게 이동하고 다른 하나는 천천히 움직이고 있다."
 
-### 4.4 카메라 간 중복 처리 (Phase 2)
+### 4.4 카메라 간 중복 처리
 
-- Re-ID 미구현 시점에는 LLM에게 "동일 객체일 가능성" 판단을 맡기지 않음
-- 규칙 기반 필터링: 동일 시간대, 인접 공간의 카메라에서 같은 `class_name`이 감지되면 경고 로그만 기록
-- Phase 4 (Re-ID 구현) 이후에 중복 제거 로직 추가
+- Re-ID 미구현: 각 카메라의 LLM 응답이 독립적으로 취합됨
+- SpaceLogger가 각 카메라의 텍스트를 모아 하나의 문장으로 종합
+- 중복 객체 판단 로직 없음 — 향후 Phase 4에서 추가
 
 ---
 
@@ -156,26 +160,26 @@ LLM은 다음 중 하나라도 발생 시 호출된다:
 class LLMCallDebouncer:
     def __init__(self, cooldown_seconds: float = 3.0):
         self.cooldown = cooldown_seconds
-        self.last_call_time: Dict[str, float] = {}  # key: "{space_id}_{track_id}"
+        self._last_call: Dict[str, float] = {}
 
-    def should_call(self, space_id: str, track_id: int) -> bool:
-        key = f"{space_id}_{track_id}"
+    def should_call(self, key: str) -> bool:
         now = time.time()
-        if key in self.last_call_time:
-            if now - self.last_call_time[key] < self.cooldown:
-                return False
-        self.last_call_time[key] = now
+        last = self._last_call.get(key, 0.0)
+        if now - last < self.cooldown:
+            return False
+        self._last_call[key] = now
         return True
 ```
+
+> NLPLogger에서는 key = `f"{camera_id}_batch"`, SpaceLogger에서는 key = space_id 를 사용한다.
 
 - **쿨다운:** 동일 공간·동일 객체에 대해 최소 3초 간격으로 LLM 호출
 - **이유:** 임계값 근처에서 상태가 왔다갔다 할 때 (예: `SLOW_MOVE ↔ FAST_MOVE`) 불필요한 호출 방지
 
 ### 5.3 배치 vs 즉시 호출
 
-- **Phase 1 (단일 카메라):** 상태 변화 감지 시점 → 디바운스 확인 → 즉시 LLM 호출
-- **Phase 2 (다중 카메라):** 동일 공간 내 N초(기본 5초) 동안의 변화를 수집 후 단일 LLM 호출로 배치 처리
-- **이유:** 다중 카메라 환경에서 개별 호출은 비용이 기하급수적으로 증가하므로, 공간별 배치가 효율적
+- **단일 카메라 (NLPLogger):** 상태 변화 감지 시점 → 디바운스 확인(3초) → 즉시 LLM 호출 (백그라운드 큐)
+- **다중 카메라 취합 (SpaceLogger):** 각 카메라 로그 수집 → try_flush()로 즉시 flush 시도 (flush_threshold 카메라 수 도달 시) + 10초 주기 안전망
 
 ---
 

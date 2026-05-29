@@ -41,12 +41,15 @@ class LLMConfig:
     model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "gpt-4o-mini"))
     cooldown_seconds: float = 3.0
     language: str = "ko"
+    vision_enabled: bool = field(default_factory=lambda: os.getenv("VISION_ENABLED", "1") == "1")
+    vision_quality: int = field(default_factory=lambda: int(os.getenv("VISION_QUALITY", "60")))
+    vision_max_width: int = field(default_factory=lambda: int(os.getenv("VISION_MAX_WIDTH", "1024")))
 
 
 @dataclass
 class PipelineConfig:
     target_classes: List[str] = field(default_factory=lambda: ["cat"])
-    interaction_classes: List[str] = field(default_factory=list)
+    interaction_classes: Optional[List[str]] = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
