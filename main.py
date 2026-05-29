@@ -3,6 +3,7 @@ load_dotenv()
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -172,7 +173,11 @@ def main():
     parser.add_argument("--model", default="yolo26s.pt", help="YOLO model path")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     parser.add_argument("--config", default="config/spaces.yaml", help="Config file path (multi-camera mode)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG-level logging")
     args = parser.parse_args()
+
+    if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
+        logging.getLogger().setLevel(logging.DEBUG)
 
     config = PipelineConfig(
         target_classes=args.target_classes,

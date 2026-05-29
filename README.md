@@ -120,6 +120,46 @@ MODEL_NAME=gpt-4o-mini                    # 사용하려는 모델명
 
 ---
 
+## Debugging
+
+### `--verbose` / `-v` 플래그
+
+`main.py`에 `--verbose`를 추가하면 모든 모듈의 **DEBUG 레벨 로그**가 `docker logs`(또는 stdout/stderr)로 출력됩니다.
+
+```bash
+# Docker (multi-camera 모드)
+docker run --rm --network host \
+  -v ./config:/app/config:ro -v ./logs:/app/logs -v ./.env:/app/.env:ro \
+  tracking-cano python main.py --live --verbose
+
+# 로컬 (single-live 모드)
+python main.py --live rtsp://... --verbose
+```
+
+### DEBUG 로그 종류
+
+| 로그 | Level | 모듈 | 설명 |
+|------|-------|------|------|
+| `target N state OLD->NEW hold=M/MIN` | DEBUG | pipeline | 상태 전환 시도와 hold 진행률 |
+| `target N interactions changed` | DEBUG | pipeline | 상호작용 변화 감지 |
+| `frame=N skipped (interval=16)` | DEBUG | orchestrator | skip으로 건너뛴 프레임 |
+| `target N: speed=X acc=Y angle=Z thresh=W -> STATE` | DEBUG | analyzer | 이동 분류 결정과 threshold 값 |
+| `target N vs person M: iou=X dist=Y -> nearby` | DEBUG | interaction_detector | IoU/거리 기반 관계 분류 |
+| `No detections` / `No tracking IDs` | DEBUG | tracker | 탐지 실패 vs 추적 실패 구분 |
+| `Detect: N boxes, M tracked, K interaction` | DEBUG | tracker | 추론 결과 요약 |
+| `[logger] enqueue: key (qsize=N)` | DEBUG | nlp.logger | LLM 큐 enqueue와 backlog |
+| `[logger] LLM call: camera=X prompt=N chars` | DEBUG | nlp.logger | LLM API 호출 시점과 비용 |
+| `[space:X] try_flush skipped: N < M` | DEBUG | nlp.logger | SpaceLogger flush 조건 미달 |
+| `disappeared: target N (cat)` | INFO | pipeline | target이 화면에서 사라짐 |
+| `Model loaded: yolo26n.pt` | INFO | tracker | YOLO 모델 적재 완료 |
+| `[CAM FPS] livingroom frame=312 fps=14.9` | INFO | orchestrator | 5초 간격 카메라별 FPS |
+
+### `LOG_LEVEL` 환경변수
+
+`LOG_LEVEL=DEBUG` 환경변수로도 동일하게 DEBUG 로깅을 활성화할 수 있습니다 (`--verbose`와 동일).
+
+---
+
 ## Benchmark
 
 ### RTSP 스트림 벤치마크 (`bench_rtsp.py`)

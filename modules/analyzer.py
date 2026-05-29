@@ -1,8 +1,11 @@
+import logging
 from typing import Any, Dict, Tuple
 import numpy as np
 
 from config.config import Thresholds
 from modules.tracker import MovementState, TrackedBBox
+
+logger = logging.getLogger(__name__)
 
 
 def classify_movement(tracked: TrackedBBox, thresholds: Thresholds) -> Tuple[MovementState, Dict[str, Any]]:
@@ -23,11 +26,14 @@ def classify_movement(tracked: TrackedBBox, thresholds: Thresholds) -> Tuple[Mov
 
     state = _classify(speed, acceleration, direction_angle, slow_thresh, thresholds)
 
-    return state, {
+    result = {
         "speed": round(speed, 2),
         "acceleration": round(acceleration, 2),
         "direction_angle": round(direction_angle, 2),
     }
+    logger.debug("target %d: speed=%.1f acc=%.1f angle=%.1f slow_thresh=%.1f -> %s",
+                 tracked.track_id, speed, acceleration, direction_angle, slow_thresh, state.name)
+    return state, result
 
 
 def _classify(

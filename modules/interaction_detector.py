@@ -1,7 +1,10 @@
+import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
 from modules.tracker import TrackedBBox
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,7 +39,9 @@ class InteractionDetector:
             elif has_proximity:
                 relation = "nearby"
             else:
+                logger.debug("target %d vs %s %d: iou=%.2f dist=%.1f -> none", target.track_id, obj.class_name, obj.track_id, iou, dist)
                 continue
+            logger.debug("target %d vs %s %d: iou=%.2f dist=%.1f -> %s", target.track_id, obj.class_name, obj.track_id, iou, dist, relation)
             results.append(InteractionResult(
                 track_id=obj.track_id,
                 class_name=obj.class_name,

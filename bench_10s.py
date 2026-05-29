@@ -299,6 +299,8 @@ def main():
                         help="Process entire video instead of time-limited run")
     parser.add_argument("--count", type=int, default=1,
                         help="Number of videos to process concurrently (default: 1)")
+    parser.add_argument("--model", type=str, default=None,
+                        help="YOLO model path (default: yolo26s.pt)")
     args = parser.parse_args()
 
     if args.video:
@@ -311,6 +313,10 @@ def main():
         return
 
     frame_skip = args.frame_skip if args.frame_skip is not None else YOLOConfig().frame_skip
+
+    if args.model:
+        import config.config as _cc
+        _cc.YOLOConfig.model_path = args.model
 
     print("=" * 60)
     mode_str = f"Mode: {args.mode}"

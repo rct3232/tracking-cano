@@ -76,6 +76,7 @@ class Tracker:
                 enabled=self.config.tile_enabled,
                 yolo_classes=self.config.yolo_classes,
             )
+            logger.info("Model loaded: %s (quantize=%s)", self.config.model_path, self.config.quantize)
 
     def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int, interaction_classes: List[str] | None = None) -> tuple[List[TrackedBBox], List[TrackedBBox]]:
         all_classes = list(dict.fromkeys(target_classes + (interaction_classes or [])))
@@ -92,10 +93,12 @@ class Tracker:
             return [], []
 
         if not result or result.boxes is None:
+            logger.debug("No detections")
             return [], []
 
         boxes = result.boxes
         if not hasattr(boxes, "id") or boxes.id is None or len(boxes.id) == 0:
+            logger.debug("No tracking IDs from ByteTrack")
             return [], []
 
         class_name_map = self._CLASS_NAME_MAP
@@ -149,6 +152,7 @@ class Tracker:
                 interactions.append(tb)
 
         self._history = {t.track_id: t for t in tracked + interactions}
+        logger.debug("Detect: %d boxes, %d tracked, %d interaction, %d unique IDs", len(boxes), len(tracked), len(interactions), len(current_ids))
         return tracked, interactions
 
     @staticmethod

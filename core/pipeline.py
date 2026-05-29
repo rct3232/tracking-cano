@@ -35,8 +35,7 @@ class Pipeline:
 
         if not tracked_list:
             self._check_disappeared(set())
-            if interaction_list:
-                logger.debug("[%s] frame=%d: no target, %d interactions", self.camera_id, frame_id, len(interaction_list))
+            logger.debug("[%s] frame=%d: no targets, %d interactions", self.camera_id, frame_id, len(interaction_list) if interaction_list else 0)
             return None
 
         current_ids: Set[int] = {t.track_id for t in tracked_list}
@@ -71,6 +70,7 @@ class Pipeline:
                 continue
 
             if prev_state != state:
+                logger.debug("[%s] target %d state %s->%s hold=%d/%d", self.camera_id, t.track_id, prev_state.name, state.name, hold, self.config.thresholds.min_frames)
                 if hold >= self.config.thresholds.min_frames:
                     self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
                     results.append(self._state_summary(t))
@@ -84,6 +84,7 @@ class Pipeline:
 
                 prev_interactions = self._prev_interactions.get(t.track_id)
                 if self._interactions_changed(prev_interactions, interactions):
+                    logger.debug("[%s] target %d interactions changed", self.camera_id, t.track_id)
                     self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
                     results.append(self._state_summary(t))
                     self._prev_interactions[t.track_id] = interactions
@@ -106,6 +107,7 @@ class Pipeline:
                 self._prev_frame_ids.pop(t_id, None)
                 self._state_hold.pop(t_id, None)
                 self._prev_interactions.pop(t_id, None)
+                logger.info("[%s] disappeared: target %d (%s)", self.camera_id, t_id, cls_name)
         return disappeared
 
     def _interactions_changed(self, prev: List[InteractionResult] | None, curr: List[InteractionResult]) -> bool:

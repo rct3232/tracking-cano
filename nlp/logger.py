@@ -89,8 +89,10 @@ class NLPLogger:
             return None
         debounce_key = f"{camera_id}_batch"
         if not self.debouncer.should_call(debounce_key):
+            logger.debug("[logger] debounce suppress: %s", debounce_key)
             return None
         self._queue.put(_LogTask(tracked_list, camera_id, interaction_results, space_logger, space_id))
+        logger.debug("[logger] enqueue: %s (qsize=%d)", debounce_key, self._queue.qsize())
         return None
 
     def stop(self):
@@ -111,6 +113,7 @@ class NLPLogger:
             return
         timestamp = datetime.now(timezone.utc).isoformat()
         prompt = self._build_prompt(changes, timestamp, task.camera_id, task.interaction_results)
+        logger.debug("[logger] LLM call: camera=%s prompt=%d chars", task.camera_id, len(prompt))
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -272,6 +275,7 @@ class SpaceLogger:
         self._camera_counts[space_id] = count
 
     def collect(self, space_id: str, camera_id: str, text: str):
+        logger.debug("[space:%s] collect from %s", space_id, camera_id)
         with self._lock:
             if space_id not in self._buffer:
                 self._buffer[space_id] = {}
@@ -322,5 +326,6 @@ class SpaceLogger:
         with self._lock:
             entries = self._buffer.get(space_id, {})
             if len(entries) < self._flush_threshold:
+                logger.debug("[space:%s] try_flush skipped: %d < %d", space_id, len(entries), self._flush_threshold)
                 return None
         return self.flush(space_id, space_name)

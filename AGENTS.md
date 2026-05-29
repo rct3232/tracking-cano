@@ -6,6 +6,7 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 - SpaceLogger: 동일 공간 카메라 로그 취합 → 주기적 flush(10s) + 이벤트 기반 try_flush()로 LLM 요약
 
 ## Commandments
+0. **디버깅 시 DEBUG 로깅 필수** — 문제 진단이 필요한 경우 반드시 `--verbose`/`-v`(또는 `LOG_LEVEL=DEBUG`)를 추가하여 실행하고, `docker logs`(또는 stdout) 출력에서 증거를 수집할 것. 추측으로 원인을 단정하지 말 것.
 1. **코드가 진실** — 설정값/env var/CLI 플래그는 config.py, .env.example, main.py --help를 직접 읽고 AGENTS.md에 값 나열 금지
 2. **State hold 보호** — pipeline.py 수정 시 `_state_hold` → `_prev_states` → `_check_disappeared()` 체인과의 상호작용 반드시 고려
 3. **지연 로드 원칙** — Tracker YOLO는 `_ensure_loaded()`로만 로드, `__init__`에서 로드 금지

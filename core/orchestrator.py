@@ -58,6 +58,9 @@ class _CameraWorker:
             consecutive_failures = 0
             max_failures = 5
             skip_interval = self.frame_skip + 1 if self.frame_skip > 0 else 1
+            fps_log_interval = 5.0
+            fps_frame_count = 0
+            last_fps_log = time.perf_counter()
             while not self.stop_event.is_set():
                 ret, frame = self.cap.read()
                 if not ret:
@@ -89,7 +92,16 @@ class _CameraWorker:
                     logger.debug("[%s] frame=%d infer=%.0fms", self.camera_id, frame_id, dt * 1000)
                     if result:
                         logger.info("[%s] %s", self.camera_id, result)
+                else:
+                    logger.debug("[%s] frame=%d skipped (interval=%d)", self.camera_id, frame_id, skip_interval)
                 frame_id += 1
+                fps_frame_count += 1
+                now = time.perf_counter()
+                if now - last_fps_log >= fps_log_interval:
+                    fps = fps_frame_count / (now - last_fps_log)
+                    logger.info("[CAM FPS] %s frame=%d fps=%.1f", self.camera_id, frame_id, fps)
+                    fps_frame_count = 0
+                    last_fps_log = now
 
             self.pipeline.stop()
             self.cap.release()
