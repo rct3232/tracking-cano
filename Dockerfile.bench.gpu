@@ -6,9 +6,6 @@ RUN apt-get update && \
         python3-pip \
         libgl1 \
         libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender-dev \
         libfontconfig1 \
         libfreetype6 && \
     rm -rf /var/lib/apt/lists/*
@@ -25,4 +22,5 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-ENTRYPOINT ["python", "bench_10s.py"]
+ENTRYPOINT ["python", "bench.py"]
+
