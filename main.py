@@ -79,6 +79,7 @@ def run_live(config: PipelineConfig, camera_source: str):
 
             frame_id += 1
     finally:
+        pipeline.stop()
         cap.release()
         logger.info("Camera %s released", camera_source)
 
@@ -108,6 +109,7 @@ def run_video(config: PipelineConfig, video_path: str):
             frame_id += 1
             time.sleep(1.0 / fps)
     finally:
+        pipeline.stop()
         cap.release()
 
 
@@ -124,12 +126,14 @@ def run_multi(config_path: str):
     flush_interval = 10.0
     last_flush = 0.0
     try:
-        while _running:
+        while _running and not orchestrator.all_finished:
             now = time.time()
             if now - last_flush >= flush_interval:
                 orchestrator.flush_spaces()
                 last_flush = now
             time.sleep(1)
+        if orchestrator.all_finished:
+            logger.info("All cameras finished processing")
     finally:
         orchestrator.flush_spaces()
         watcher.stop()

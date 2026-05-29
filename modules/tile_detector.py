@@ -1,30 +1,33 @@
 import numpy as np
 from ultralytics import YOLO
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 class HybridDetector:
-    def __init__(self, model: YOLO, grid_x: int = 2, grid_y: int = 2, overlap: int = 20, enabled: bool = True):
+    def __init__(self, model: YOLO, grid_x: int = 2, grid_y: int = 2, overlap: int = 20, enabled: bool = True, yolo_classes: Optional[List[str]] = None):
         self.model = model
         self.grid_x = grid_x
         self.grid_y = grid_y
         self.overlap = overlap
         self.enabled = enabled
+        self.yolo_classes = yolo_classes
+        self._class_ids = self._resolve_class_ids(yolo_classes) if yolo_classes else None
 
     def detect(self, frame: np.ndarray, conf: float, target_classes: List[str], iou: float = 0.70) -> object:
         target_class_ids = self._resolve_class_ids(target_classes)
-        results = self.model.track(frame, conf=conf, iou=iou, persist=False, verbose=False)
+        classes_arg = list(self._class_ids) if self._class_ids is not None else None
+        results = self.model.track(frame, conf=conf, iou=iou, classes=classes_arg, persist=False, verbose=False)
         has_tracks = results and results[0].boxes is not None and results[0].boxes.id is not None and len(results[0].boxes.id) > 0
         if not has_tracks:
             if self.enabled:
-                return self._tile_detect(frame, conf, target_class_ids, iou)
+                return self._tile_detect(frame, conf, target_class_ids, iou, classes_arg)
             return results[0] if results else None
         if self._has_target(results[0].boxes, target_class_ids):
             return results[0]
         if self.enabled:
-            return self._tile_detect(frame, conf, target_class_ids, iou)
+            return self._tile_detect(frame, conf, target_class_ids, iou, classes_arg)
         return results[0]
 
-    def _tile_detect(self, frame: np.ndarray, conf: float, target_class_ids: set, iou: float) -> object:
+    def _tile_detect(self, frame: np.ndarray, conf: float, target_class_ids: set, iou: float, classes_arg: Optional[List[int]] = None) -> object:
         h, w = frame.shape[:2]
         tile_w = int(w / self.grid_x)
         tile_h = int(h / self.grid_y)
@@ -39,7 +42,7 @@ class HybridDetector:
                 x2 = min(w, (gx + 1) * tile_w + overlap_x)
                 y2 = min(h, (gy + 1) * tile_h + overlap_y)
                 tile = frame[y1:y2, x1:x2]
-                results = self.model(tile, conf=conf, verbose=False)
+                results = self.model(tile, conf=conf, classes=classes_arg, verbose=False)
                 for r in results:
                     for box in r.boxes:
                         x1b, y1b, x2b, y2b = box.xyxy[0].cpu().tolist()

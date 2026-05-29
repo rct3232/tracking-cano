@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Tuple
+import logging
 import numpy as np
 from ultralytics import YOLO
 
+logger = logging.getLogger(__name__)
 from config.config import YOLOConfig, Thresholds
 from modules.tile_detector import HybridDetector
 
@@ -35,6 +37,27 @@ class TrackedBBox:
 
 
 class Tracker:
+    _CLASS_NAME_MAP = {
+        0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 4: "airplane",
+        5: "bus", 6: "train", 7: "truck", 8: "boat", 9: "traffic light",
+        10: "fire hydrant", 11: "stop sign", 12: "parking meter", 13: "bench",
+        14: "bird", 15: "cat", 16: "dog", 17: "horse", 18: "sheep",
+        19: "cow", 20: "elephant", 21: "bear", 22: "zebra", 23: "giraffe",
+        24: "backpack", 25: "umbrella", 26: "handbag", 27: "tie", 28: "suitcase",
+        29: "frisbee", 30: "skis", 31: "snowboard", 32: "sports ball",
+        33: "kite", 34: "baseball bat", 35: "baseball glove", 36: "skateboard",
+        37: "surfboard", 38: "tennis racket", 39: "bottle", 40: "wine glass",
+        41: "cup", 42: "fork", 43: "knife", 44: "spoon", 45: "bowl",
+        46: "banana", 47: "apple", 48: "sandwich", 49: "orange",
+        50: "broccoli", 51: "carrot", 52: "hot dog", 53: "pizza", 54: "donut",
+        55: "cake", 56: "chair", 57: "couch", 58: "potted plant", 59: "bed",
+        60: "dining table", 61: "toilet", 62: "tv", 63: "laptop", 64: "mouse",
+        65: "remote", 66: "keyboard", 67: "cell phone", 68: "microwave",
+        69: "oven", 70: "toaster", 71: "sink", 72: "refrigerator",
+        73: "book", 74: "clock", 75: "vase", 76: "scissors", 77: "teddy bear",
+        78: "hair drier", 79: "toothbrush",
+    }
+
     def __init__(self, config: YOLOConfig):
         self.config = config
         self.model: Optional[YOLO] = None
@@ -43,12 +66,15 @@ class Tracker:
     def _ensure_loaded(self):
         if self.model is None:
             self.model = YOLO(self.config.model_path)
+            if self.config.quantize:
+                self.model = self.model.quantize()
             self.detector = HybridDetector(
                 self.model,
                 grid_x=self.config.tile_grid_x,
                 grid_y=self.config.tile_grid_y,
                 overlap=self.config.tile_overlap,
                 enabled=self.config.tile_enabled,
+                yolo_classes=self.config.yolo_classes,
             )
 
     def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int, interaction_classes: List[str] | None = None) -> tuple[List[TrackedBBox], List[TrackedBBox]]:
@@ -61,7 +87,8 @@ class Tracker:
                 target_classes=all_classes,
                 iou=self.config.iou_threshold,
             )
-        except Exception:
+        except Exception as e:
+            logger.error("Detection error: %s", e)
             return [], []
 
         if not result or result.boxes is None:
@@ -71,27 +98,7 @@ class Tracker:
         if not hasattr(boxes, "id") or boxes.id is None or len(boxes.id) == 0:
             return [], []
 
-        class_name_map = {
-            0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 4: "airplane",
-            5: "bus", 6: "train", 7: "truck", 8: "boat", 9: "traffic light",
-            10: "fire hydrant", 11: "stop sign", 12: "parking meter", 13: "bench",
-            14: "bird", 15: "cat", 16: "dog", 17: "horse", 18: "sheep",
-            19: "cow", 20: "elephant", 21: "bear", 22: "zebra", 23: "giraffe",
-            24: "backpack", 25: "umbrella", 26: "handbag", 27: "tie", 28: "suitcase",
-            29: "frisbee", 30: "skis", 31: "snowboard", 32: "sports ball",
-            33: "kite", 34: "baseball bat", 35: "baseball glove", 36: "skateboard",
-            37: "surfboard", 38: "tennis racket", 39: "bottle", 40: "wine glass",
-            41: "cup", 42: "fork", 43: "knife", 44: "spoon", 45: "bowl",
-            46: "banana", 47: "apple", 48: "sandwich", 49: "orange",
-            50: "broccoli", 51: "carrot", 52: "hot dog", 53: "pizza", 54: "donut",
-            55: "cake", 56: "chair", 57: "couch", 58: "potted plant", 59: "bed",
-            60: "dining table", 61: "toilet", 62: "tv", 63: "laptop", 64: "mouse",
-            65: "remote", 66: "keyboard", 67: "cell phone", 68: "microwave",
-            69: "oven", 70: "toaster", 71: "sink", 72: "refrigerator",
-            73: "book", 74: "clock", 75: "vase", 76: "scissors", 77: "teddy bear",
-            78: "hair drier", 79: "toothbrush",
-        }
-
+        class_name_map = self._CLASS_NAME_MAP
         target_id_set = {k for k, v in class_name_map.items() if v in target_classes} if target_classes else set()
         interaction_id_set = {k for k, v in class_name_map.items() if v in (interaction_classes or [])}
 

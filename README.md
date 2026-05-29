@@ -120,6 +120,36 @@ MODEL_NAME=gpt-4o-mini                    # 사용하려는 모델명
 
 ---
 
+## Benchmark
+
+### RTSP 스트림 벤치마크 (`bench_rtsp.py`)
+
+RTSP 스트림에서 다중 카메라를 동시 처리하는 벤치마크. LLM 호출 포함 전체 파이프라인 측정.
+
+```bash
+# Docker
+docker run --rm --network host -v ./config:/app/config:ro -v ./logs:/app/logs tracking-cano python bench_rtsp.py --runtime 10 --frame-skip 15
+
+# 로컬
+python bench_rtsp.py --runtime 10 --frame-skip 15
+```
+
+| 옵션 | 설명 |
+|------|------|
+| `--runtime <sec>` | 실행 시간 (기본: 10초) |
+| `--frame-skip <N>` | 프레임 스킵 (N프레임마다 1회 추론, 기본: 15) |
+| `--config <path>` | 설정 파일 경로 (기본: `config/spaces.yaml`) |
+
+### 로컬 영상 벤치마크 (`benchmark.py`)
+
+`data/` 디렉토리의 영상으로 처리 가능한 프레임 수를 측정합니다.
+
+```bash
+python benchmark.py
+```
+
+---
+
 ## Project Structure
 
 ```

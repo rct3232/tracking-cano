@@ -40,6 +40,10 @@ class CameraConfig:
         self.status: str = cfg.get("status", "active")
         self.target_classes: List[str] = cfg.get("target_classes", [])
         self.interaction_classes: List[str] = cfg.get("interaction_classes", [])
+        self.model_size: str = cfg.get("model_size", "s")
+        self.model_path: Optional[str] = cfg.get("model_path", None)
+        self.quantize: bool = cfg.get("quantize", False)
+        self.frame_skip: int = cfg.get("frame_skip", 0)
 
     def __repr__(self) -> str:
         return f"CameraConfig(id={self.id!r}, source={self.source!r}, status={self.status!r})"

@@ -21,13 +21,17 @@ class Thresholds:
 
 @dataclass
 class YOLOConfig:
-    model_path: str = "yolo26s.pt"
+    model_size: str = "s"
+    model_path: Optional[str] = None
+    quantize: bool = False
+    frame_skip: int = field(default_factory=lambda: int(os.getenv("FRAME_SKIP", "0")))
     conf_threshold: float = field(default_factory=lambda: float(os.getenv("CONF_THRESHOLD", "0.25")))
     iou_threshold: float = field(default_factory=lambda: float(os.getenv("IOU_THRESHOLD", "0.70")))
+    yolo_classes: Optional[List[str]] = None
     tile_grid_x: int = field(default_factory=lambda: int(os.getenv("TILE_GRID_X", "2")))
     tile_grid_y: int = field(default_factory=lambda: int(os.getenv("TILE_GRID_Y", "2")))
     tile_overlap: int = field(default_factory=lambda: int(os.getenv("TILE_OVERLAP", "20")))
-    tile_enabled: bool = field(default_factory=lambda: os.getenv("TILE_ENABLED", "1") == "1")
+    tile_enabled: bool = field(default_factory=lambda: os.getenv("TILE_ENABLED", "0") == "1")
 
 
 @dataclass

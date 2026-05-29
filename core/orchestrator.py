@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
@@ -11,14 +11,33 @@ from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
 
+_STREAM_PREFIXES = ("rtsp://", "http://", "https://")
+
+
+def _is_stream_source(source: str) -> bool:
+    return source.startswith(_STREAM_PREFIXES)
+
 
 class _CameraWorker:
-    def __init__(self, camera_id: str, pipeline: Pipeline, cap, source: str, stop_event: threading.Event):
+    def __init__(
+        self,
+        camera_id: str,
+        pipeline: Pipeline,
+        cap,
+        source: str,
+        stop_event: threading.Event,
+        frame_skip: int = 0,
+        on_finished: Optional[Callable[[str], None]] = None,
+    ):
         self.camera_id = camera_id
         self.pipeline = pipeline
         self.cap = cap
         self.source = source
         self.stop_event = stop_event
+        self.frame_skip = frame_skip
+        self.on_finished = on_finished
+        self._is_stream = _is_stream_source(source)
+        self._finished = False
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"cam-{camera_id}")
 
     def start(self):
@@ -27,43 +46,78 @@ class _CameraWorker:
     def stop(self):
         self.stop_event.set()
         self.thread.join(timeout=5)
-        self.cap.release()
+        if not self._finished:
+            self.pipeline.stop()
+            self.cap.release()
+            self._finished = True
         logger.info("Camera %s stopped", self.camera_id)
 
     def _run(self):
-        frame_id = 0
-        consecutive_failures = 0
-        max_failures = 5
-        while not self.stop_event.is_set():
-            ret, frame = self.cap.read()
-            if not ret:
-                consecutive_failures += 1
-                if consecutive_failures == 1:
-                    logger.warning("Camera %s read failure (1/%d), source=%s", self.camera_id, max_failures, self.source)
-                if consecutive_failures >= max_failures:
-                    logger.warning("Camera %s reconnecting... (%d consecutive failures)", self.camera_id, consecutive_failures)
-                    self.cap.release()
-                    new_cap = create_capture(self.source)
-                    if new_cap is None:
-                        logger.error("Camera %s reconnect failed for %s", self.camera_id, self.source)
-                        time.sleep(2)
-                        continue
-                    self.cap = new_cap
-                    consecutive_failures = 0
-                else:
-                    time.sleep(0.5)
-                continue
+        try:
+            frame_id = 0
             consecutive_failures = 0
-            result = self.pipeline.process_frame(frame, frame_id)
-            if result:
-                logger.info("[%s] %s", self.camera_id, result)
-            frame_id += 1
+            max_failures = 5
+            skip_interval = self.frame_skip + 1 if self.frame_skip > 0 else 1
+            while not self.stop_event.is_set():
+                ret, frame = self.cap.read()
+                if not ret:
+                    if self._is_stream:
+                        consecutive_failures += 1
+                        if consecutive_failures == 1:
+                            logger.warning("Camera %s read failure (1/%d), source=%s", self.camera_id, max_failures, self.source)
+                        if consecutive_failures >= max_failures:
+                            logger.warning("Camera %s reconnecting... (%d consecutive failures)", self.camera_id, consecutive_failures)
+                            self.cap.release()
+                            new_cap = create_capture(self.source)
+                            if new_cap is None:
+                                logger.error("Camera %s reconnect failed for %s", self.camera_id, self.source)
+                                time.sleep(2)
+                                continue
+                            self.cap = new_cap
+                            consecutive_failures = 0
+                        else:
+                            time.sleep(0.5)
+                        continue
+                    else:
+                        logger.info("Camera %s video ended (%s)", self.camera_id, self.source)
+                        break
+                consecutive_failures = 0
+                if frame_id % skip_interval == 0:
+                    t0 = time.perf_counter()
+                    result = self.pipeline.process_frame(frame, frame_id)
+                    dt = time.perf_counter() - t0
+                    logger.debug("[%s] frame=%d infer=%.0fms", self.camera_id, frame_id, dt * 1000)
+                    if result:
+                        logger.info("[%s] %s", self.camera_id, result)
+                frame_id += 1
+
+            self.pipeline.stop()
+            self.cap.release()
+            self._finished = True
+            logger.info("Camera %s finished", self.camera_id)
+            if self.on_finished:
+                self.on_finished(self.camera_id)
+        except Exception:
+            logger.exception("Camera %s worker crashed", self.camera_id)
+            self.pipeline.stop()
+            self.cap.release()
+            self._finished = True
+            if self.on_finished:
+                self.on_finished(self.camera_id)
 
 
 def _make_pipeline_config(camera: CameraConfig) -> PipelineConfig:
     thresholds = Thresholds()
     llm = LLMConfig()
-    yolo = YOLOConfig()
+    model_path = camera.model_path or f"yolo26{camera.model_size}.pt"
+    yolo = YOLOConfig(
+        model_size=camera.model_size,
+        model_path=model_path,
+        quantize=camera.quantize,
+        frame_skip=camera.frame_skip,
+    )
+    all_classes = list(dict.fromkeys(camera.target_classes + camera.interaction_classes))
+    yolo.yolo_classes = all_classes if all_classes else None
     return PipelineConfig(
         target_classes=camera.target_classes,
         interaction_classes=camera.interaction_classes,
@@ -88,6 +142,11 @@ class Orchestrator:
     def spaces(self) -> list[SpaceConfig]:
         return self.app_config.spaces
 
+    @property
+    def all_finished(self) -> bool:
+        with self._lock:
+            return len(self._workers) == 0
+
     def start(self):
         for cam in self.app_config.cameras:
             if cam.status != "active":
@@ -104,11 +163,19 @@ class Orchestrator:
         config = _make_pipeline_config(camera)
         pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
         stop_event = threading.Event()
-        worker = _CameraWorker(camera.id, pipeline, cap, camera.source, stop_event)
+        worker = _CameraWorker(
+            camera.id, pipeline, cap, camera.source, stop_event, camera.frame_skip,
+            on_finished=self.worker_finished,
+        )
         with self._lock:
             self._workers[camera.id] = worker
         worker.start()
         logger.info("Camera %s started (%s, space=%s)", camera.id, camera.source, space_id)
+
+    def worker_finished(self, camera_id: str):
+        with self._lock:
+            self._workers.pop(camera_id, None)
+        logger.info("Worker %s removed from orchestrator (%d remaining)", camera_id, len(self._workers))
 
     def remove_camera(self, camera_id: str):
         with self._lock:

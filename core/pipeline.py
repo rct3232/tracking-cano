@@ -35,6 +35,8 @@ class Pipeline:
 
         if not tracked_list:
             self._check_disappeared(set())
+            if interaction_list:
+                logger.debug("[%s] frame=%d: no target, %d interactions", self.camera_id, frame_id, len(interaction_list))
             return None
 
         current_ids: Set[int] = {t.track_id for t in tracked_list}
@@ -70,10 +72,8 @@ class Pipeline:
 
             if prev_state != state:
                 if hold >= self.config.thresholds.min_frames:
-                    text = self.nlp_logger.log([t], self.camera_id, interactions)
-                    if text:
-                        results.append(text)
-                        self._collect(text)
+                    self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
+                    results.append(self._state_summary(t))
                     self._prev_states[t.track_id] = state
                     self._prev_frame_ids[t.track_id] = frame_id
                     self._state_hold[t.track_id] = 0
@@ -84,18 +84,17 @@ class Pipeline:
 
                 prev_interactions = self._prev_interactions.get(t.track_id)
                 if self._interactions_changed(prev_interactions, interactions):
-                    text = self.nlp_logger.log([t], self.camera_id, interactions)
-                    if text:
-                        results.append(text)
-                        self._collect(text)
+                    self.nlp_logger.log([t], self.camera_id, interactions, self.space_logger, self.space_id)
+                    results.append(self._state_summary(t))
                     self._prev_interactions[t.track_id] = interactions
 
         return " | ".join(results) if results else None
 
-    def _collect(self, text: str):
-        if self.space_logger and self.space_id:
-            self.space_logger.collect(self.space_id, self.camera_id, text)
-            self.space_logger.try_flush(self.space_id, self.space_id)
+    def _state_summary(self, t: TrackedBBox) -> str:
+        return f"target {t.track_id} ({t.class_name}) {t.state.name}"
+
+    def stop(self):
+        self.nlp_logger.stop()
 
     def _check_disappeared(self, current_ids: Set[int]) -> List[tuple]:
         disappeared = []

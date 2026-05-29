@@ -1,5 +1,8 @@
 import logging
+import queue
+import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -36,6 +39,15 @@ DIRECTION_MAP = {
 }
 
 
+@dataclass
+class _LogTask:
+    tracked_list: List[TrackedBBox]
+    camera_id: str
+    interaction_results: List[InteractionResult] | None
+    space_logger: Optional['SpaceLogger'] = None
+    space_id: Optional[str] = None
+
+
 class LLMCallDebouncer:
     def __init__(self, cooldown_seconds: float = 3.0):
         self.cooldown = cooldown_seconds
@@ -57,6 +69,10 @@ class NLPLogger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.debouncer = LLMCallDebouncer(config.cooldown_seconds)
         self.client: Optional[OpenAI] = None
+        self._queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._worker_thread = threading.Thread(target=self._worker, daemon=True, name="nlp-worker")
+        self._worker_thread.start()
 
     def _ensure_client(self):
         if self.client is None and self.config.api_key:
@@ -65,26 +81,36 @@ class NLPLogger:
                 api_key=self.config.api_key,
             )
 
-    def log(self, tracked_list: List[TrackedBBox], camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None) -> Optional[str]:
+    def log(self, tracked_list: List[TrackedBBox], camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None, space_logger: Optional['SpaceLogger'] = None, space_id: Optional[str] = None) -> Optional[str]:
         if not tracked_list:
             return None
-
         self._ensure_client()
         if self.client is None:
             return None
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-        changes = self._build_state_changes(tracked_list)
-
-        if not changes:
-            return None
-
         debounce_key = f"{camera_id}_batch"
         if not self.debouncer.should_call(debounce_key):
             return None
+        self._queue.put(_LogTask(tracked_list, camera_id, interaction_results, space_logger, space_id))
+        return None
 
-        prompt = self._build_prompt(changes, timestamp, camera_id, interaction_results)
+    def stop(self):
+        self._stop_event.set()
+        self._worker_thread.join(timeout=5)
 
+    def _worker(self):
+        while not self._stop_event.is_set():
+            try:
+                task = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._process_task(task)
+
+    def _process_task(self, task: _LogTask):
+        changes = self._build_state_changes(task.tracked_list)
+        if not changes:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        prompt = self._build_prompt(changes, timestamp, task.camera_id, task.interaction_results)
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -96,11 +122,12 @@ class NLPLogger:
                 temperature=0.3,
             )
             text = response.choices[0].message.content.strip()
+            self._save_log(text, timestamp, task.camera_id)
+            if task.space_logger and task.space_id:
+                task.space_logger.collect(task.space_id, task.camera_id, text)
+                task.space_logger.try_flush(task.space_id, task.space_id)
         except Exception as e:
             logger.error("LLM API call failed: %s", e)
-            return None
-
-        self._save_log(text, timestamp, camera_id)
         return text
 
     def _build_state_changes(self, tracked_list: List[TrackedBBox]) -> List[Dict]:
@@ -163,72 +190,22 @@ class NLPLogger:
         self._ensure_client()
         if self.client is None:
             return None
-
         debounce_key = f"{camera_id}_{tracked.track_id}"
         if not self.debouncer.should_call(debounce_key):
             return None
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-        prompt = (
-            f"Timestamp: {timestamp}\n"
-            f"Camera: {camera_id}\n\n"
-            f"A {tracked.class_name} has appeared in the frame.\n"
-        )
-        if interaction_results:
-            prompt += "\nInteractions with nearby objects:\n"
-            for ir in interaction_results:
-                rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
-                prompt += f"- {ir.class_name}: {rel}\n"
-        prompt += "\nDescribe this event including any object interactions in one sentence."
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=150,
-                temperature=0.3,
-            )
-            text = response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error("LLM API call failed: %s", e)
-            return None
-
-        self._save_log(text, timestamp, camera_id)
-        return text
+        self._queue.put(_LogTask([tracked], camera_id, interaction_results))
+        return None
 
     def log_disappearance(self, track_id: int, class_name: str, camera_id: str = "cam_01") -> Optional[str]:
         self._ensure_client()
         if self.client is None:
             return None
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-        prompt = (
-            f"Timestamp: {timestamp}\n"
-            f"Camera: {camera_id}\n\n"
-            f"The {class_name} has disappeared from the frame.\n\n"
-            "Describe this event in one sentence."
+        fake_tracked = TrackedBBox(
+            track_id=track_id, frame_id=0, x1=0, y1=0, x2=0, y2=0,
+            confidence=0.0, class_id=0, class_name=class_name,
         )
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=150,
-                temperature=0.3,
-            )
-            text = response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error("LLM API call failed: %s", e)
-            return None
-
-        self._save_log(text, timestamp, camera_id)
-        return text
+        self._queue.put(_LogTask([fake_tracked], camera_id, None))
+        return None
 
 
 def _angle_to_direction(speed: float, angle: float) -> str:
@@ -282,6 +259,7 @@ class SpaceLogger:
         self._buffer: Dict[str, Dict[str, List[str]]] = {}
         self._flush_threshold = flush_threshold
         self._camera_counts: Dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def _ensure_client(self):
         if self.client is None and self.config.api_key:
@@ -294,14 +272,16 @@ class SpaceLogger:
         self._camera_counts[space_id] = count
 
     def collect(self, space_id: str, camera_id: str, text: str):
-        if space_id not in self._buffer:
-            self._buffer[space_id] = {}
-        if camera_id not in self._buffer[space_id]:
-            self._buffer[space_id][camera_id] = []
-        self._buffer[space_id][camera_id].append(text)
+        with self._lock:
+            if space_id not in self._buffer:
+                self._buffer[space_id] = {}
+            if camera_id not in self._buffer[space_id]:
+                self._buffer[space_id][camera_id] = []
+            self._buffer[space_id][camera_id].append(text)
 
     def flush(self, space_id: str, space_name: str) -> Optional[str]:
-        entries = self._buffer.pop(space_id, {})
+        with self._lock:
+            entries = self._buffer.pop(space_id, {})
         if not entries:
             return None
         self._ensure_client()
@@ -339,7 +319,8 @@ class SpaceLogger:
     def try_flush(self, space_id: str, space_name: str) -> Optional[str]:
         if self._flush_threshold <= 0:
             return None
-        entries = self._buffer.get(space_id, {})
-        if len(entries) < self._flush_threshold:
-            return None
+        with self._lock:
+            entries = self._buffer.get(space_id, {})
+            if len(entries) < self._flush_threshold:
+                return None
         return self.flush(space_id, space_name)
