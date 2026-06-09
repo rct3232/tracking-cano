@@ -190,6 +190,7 @@ class NLPLogger:
         if self.client is None:
             return None
         timestamp = datetime.now(timezone.utc).isoformat()
+        capture_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
 
         user_messages = [{"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"}]
 
@@ -264,6 +265,16 @@ class NLPLogger:
                 continue
 
         if target_present:
+            last_per_cam: dict[str, str] = {}
+            for cam_id, img_b64 in images:
+                last_per_cam[cam_id] = img_b64
+            for cam_id, img_b64 in last_per_cam.items():
+                filename = f"{space_name}_{cam_id}_{capture_ts}.jpg"
+                try:
+                    (self.output_dir / filename).write_bytes(base64.b64decode(img_b64))
+                except Exception as e:
+                    logger.error("Failed to save target capture %s: %s", filename, e)
+
             log_file = self.log_dir / f"vision_space_{space_name}_{datetime.now().strftime('%Y%m%d')}.log"
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {reasoning}\n")
