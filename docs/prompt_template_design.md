@@ -29,12 +29,6 @@ SYSTEM_PROMPT = (
 - **금지 사항:** 추측, 감정어, 확인되지 않은 정보
 - **길이 제한:** 최대 150 tokens (`max_tokens=150`)
 
-### 2.3 언어 선택 기준
-
-- 기본 언어: 한국어 (`ko`)
-- `LLMConfig.language` 필드로 설정 가능 (`ko`, `en`)
-- 현재는 YAML/env var에서 설정 불가 — `config/config.py`에서 직접 변경 필요
-
 ---
 
 ## 3. 단일 카메라 상태 보고용 프롬프트 템플릿

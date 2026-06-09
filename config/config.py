@@ -16,7 +16,6 @@ class Thresholds:
     rotation_threshold: float = field(default_factory=lambda: float(os.getenv("ROTATION_THRESHOLD", "45.0")))
     hysteresis: float = field(default_factory=lambda: float(os.getenv("HYSTERESIS", "5.0")))
     min_frames: int = field(default_factory=lambda: int(os.getenv("MIN_FRAMES", "3")))
-    surge_min_frames: int = field(default_factory=lambda: int(os.getenv("SURGE_MIN_FRAMES", "2")))
 
 
 @dataclass
@@ -40,11 +39,9 @@ class LLMConfig:
     api_key: str = field(default_factory=lambda: os.getenv("API_KEY", ""))
     model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "gpt-4o-mini"))
     cooldown_seconds: float = 3.0
-    language: str = "ko"
     vision_enabled: bool = field(default_factory=lambda: os.getenv("VISION_ENABLED", "1") == "1")
     vision_quality: int = field(default_factory=lambda: int(os.getenv("VISION_QUALITY", "60")))
     vision_max_width: int = field(default_factory=lambda: int(os.getenv("VISION_MAX_WIDTH", "1024")))
-    mode: str = field(default_factory=lambda: os.getenv("MODE", "cv_pipeline"))
     snapshot_count: int = field(default_factory=lambda: int(os.getenv("VISION_SNAPSHOT_COUNT", "5")))
     snapshot_interval: float = field(default_factory=lambda: float(os.getenv("VISION_INTERVAL_SECONDS", "30")))
 

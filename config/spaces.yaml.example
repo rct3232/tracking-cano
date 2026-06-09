@@ -36,9 +36,3 @@ cameras:
 #   speed_slow: 20      # 정지/천천히 이동 기준 (px/frame)
 #   speed_fast: 40      # 천천히/빠르게 이동 기준 (px/frame)
 
-# === LLM 설정 (선택 — 생략 시 디폴트 적용) ===
-# llm:
-#   provider: openai
-#   model: gpt-4o-mini
-#   api_endpoint: https://api.openai.com/v1
-#   temperature: 0.7

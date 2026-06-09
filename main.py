@@ -11,7 +11,7 @@ import time
 import cv2
 
 from config.config import PipelineConfig
-from core.config_manager import ConfigWatcher, diff_configs
+from core.config_manager import ConfigWatcher
 from core.pipeline import Pipeline
 from core.orchestrator import Orchestrator
 from nlp.logger import SpaceLogger

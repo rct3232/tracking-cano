@@ -67,12 +67,10 @@ class AppConfig:
         cameras: List[CameraConfig],
         spaces: List[SpaceConfig],
         thresholds: Dict[str, Any],
-        llm: Dict[str, Any],
     ):
         self.cameras = cameras
         self.spaces = spaces
         self.thresholds = thresholds
-        self.llm = llm
 
 # ── Loading ────────────────────────────────────────────────────────
 
@@ -95,14 +93,13 @@ def load_config(
     cameras = _parse_cameras(raw)
     spaces = _parse_spaces(raw)
     thresholds = _parse_thresholds(raw)
-    llm = _parse_llm(raw)
 
     logger.info(
         "Config loaded: %d cameras, %d spaces",
         len(cameras),
         len(spaces),
     )
-    return AppConfig(cameras, spaces, thresholds, llm)
+    return AppConfig(cameras, spaces, thresholds)
 
 def _read_yaml(path: str) -> Dict[str, Any]:
     """Read and parse a YAML file."""
@@ -148,14 +145,6 @@ def _parse_thresholds(raw: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(DEFAULT_THRESHOLDS)
     result.update(raw_thresholds)
     return result
-
-def _parse_llm(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse LLM config — only keys explicitly set in YAML."""
-    raw_llm = raw.get("llm", {})
-    if not isinstance(raw_llm, dict):
-        raise ValueError("'llm' must be a mapping")
-    return raw_llm
-
 
 # ── Diff ────────────────────────────────────────────────────────────
 

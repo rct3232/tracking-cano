@@ -117,7 +117,7 @@ class MovementState(Enum):
 | `rotation_threshold` | 45 | deg | 회전 판단 방향 변화 임계값 |
 | `hysteresis` | 5 | px/frame | 상태 전환 히스테리시스 |
 | `min_frames` | 3 | frame | 상태 유지 최소 프레임 수 (플리커 방지) |
-| `surge_min_frames` | 2 | frame | 급속 가속 감지 최소 프레임 수 |
+
 
 ---
 
@@ -191,22 +191,18 @@ def detect(self, target: TrackedBBox, interactions: List[TrackedBBox]) -> List[I
 frame (np.ndarray, BGR H×W×3)
     │
     ▼
-┌──────────────────────┐
-│ detector.detect()     │  ← target_classes: config에서 로드
-└──────────────────────┘
-    │ List[BBox]
-    ▼
-┌──────────────────────┐
-│ tracker.update()      │  ← prev_tracked: 이전 프레임 캐시
-└──────────────────────┘
-    │ List[TrackedBBox]
+┌─────────────────────────────────────┐
+│ tracker.update()                     │  ← YOLO 추론 + ByteTrack 통합
+│   (detector는 tracker로 통합됨)       │  ← target_classes: config에서 로드
+└─────────────────────────────────────┘
+    │ (List[TrackedBBox], List[TrackedBBox])
     ├─────────────────────────────────────────┐
     ▼                                         ▼
 ┌──────────────────────┐           ┌──────────────────────────┐
 │ analyzer             │           │ interaction_detector     │
-│ .classify_movement()  │           │ .detect_interactions()   │
+│ .classify_movement()  │           │ .detect()                │
 └──────────────────────┘           └──────────────────────────┘
-    │ (MovementState, meta)              │ List[Interaction]
+    │ (MovementState, meta)              │ List[InteractionResult]
     ▼                                    ▼
 ┌───────────────────────────────────────────────────────┐
 │ nlp_logger.log()                                      │

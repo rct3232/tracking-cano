@@ -91,12 +91,8 @@ thresholds:
   speed_slow: 20      # 정지/천천히 이동 기준 (px/frame)
   speed_fast: 40      # 천천히/빠르게 이동 기준 (px/frame)
 
-llm:
-  provider: openai
-  model: gpt-4o-mini
-  api_endpoint: https://api.openai.com/v1
-  temperature: 0.7
 ```
+
 
 `config/spaces.yaml.example`을 복사해서 사용하세요. `.gitignore`에 `config/spaces.yaml`이 제외되어 있습니다.
 
@@ -162,32 +158,16 @@ python main.py --live rtsp://... --verbose
 
 ## Benchmark
 
-### RTSP 스트림 벤치마크 (`bench_rtsp.py`)
+### 통합 벤치마크 (`bench.py`)
 
-RTSP 스트림에서 다중 카메라를 동시 처리하는 벤치마크. LLM 호출 포함 전체 파이프라인 측정.
+`bench.py`는 단일/다중 카메라, detect-only/전체 파이프라인, 메모리 프로파일링을 지원하는 통합 벤치마크입니다.
 
 ```bash
-# Docker
-docker run --rm --network host -v ./config:/app/config:ro -v ./logs:/app/logs tracking-cano python bench_rtsp.py --runtime 10 --frame-skip 15
+# Docker (bench 전용 이미지)
+docker run --rm --network host -v ./config:/app/config:ro -v ./logs:/app/logs tracking-cano python bench.py --runtime 10 --frame-skip 15
 
 # 로컬
-python bench_rtsp.py --runtime 10 --frame-skip 15
-```
-
-| 옵션 | 설명 |
-|------|------|
-| `--runtime <sec>` | 실행 시간 (기본: 10초) |
-| `--frame-skip <N>` | 프레임 스킵 (N프레임마다 1회 추론, 기본: 15) |
-| `--config <path>` | 설정 파일 경로 (기본: `config/spaces.yaml`) |
-
-### 로컬 영상 벤치마크 (`benchmark.py`, `bench_10s.py`)
-
-`benchmark.py`는 `data/` 디렉토리의 영상으로 처리 가능한 프레임 수를 측정합니다.
-`bench_10s.py`는 고정 10초 실행 벤치마크로, `Dockerfile.bench`의 기본 진입점입니다.
-
-```bash
-python benchmark.py
-python bench_10s.py --runtime 10 --frame-skip 15
+python bench.py --runtime 10 --frame-skip 15
 ```
 
 ---
@@ -212,8 +192,7 @@ tracking-cano/
 │   └── orchestrator.py              # 다중 카메라 오케스트레이션
 ├── modules/
 │   ├── __init__.py
-│   ├── detector.py                  # YOLO26 감지
-│   ├── tracker.py                   # ByteTrack 추적
+│   ├── tracker.py                   # YOLO26 감지 + ByteTrack 추적 (통합)
 │   ├── analyzer.py                  # 이동 상태 분류
 │   └── interaction_detector.py      # 상호작용 판단
 ├── nlp/
@@ -227,7 +206,9 @@ tracking-cano/
 ├── .env.example                     # 템플릿
 ├── .gitignore                       # git 제외 패턴
 ├── requirements.txt                 # 의존성
-└── MASTER_PLAN.md                   # 프로젝트 마스터 플랜
+├── bench.py                         # 통합 벤치마크
+├── Dockerfile.bench                 # 벤치마크 Docker (CPU)
+└── Dockerfile.bench.gpu             # 벤치마크 Docker (GPU)
 ```
 
 ---

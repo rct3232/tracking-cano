@@ -12,7 +12,6 @@
 spaces:       # 배열 — 공간 정의 (선택적, 디폴트: 단일 기본 공간)
 cameras:      # 배열 — 카메라 정의 (필수)
 thresholds:   # 객체  — 임계값 설정 (선택적, 디폴트 존재)
-llm:          # 객체  — LLM 설정 (선택적, 디폴트 존재)
 ```
 
 - 허용되지 않는 최상위 키는 무시하며 경고 로그 출력
@@ -144,39 +143,21 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 
 ---
 
-## 6. llm 스키마
+## 6. LLM 설정
 
-### 6.1 필드 정의
+| 환경변수 | LLMConfig 필드 | 기본값 | 설명 |
+|---------|---------------|--------|------|
+| `API_BASE_URL` | `api_base_url` | `https://api.openai.com/v1` | API 엔드포인트 URL |
+| `API_KEY` | `api_key` | — | LLM API 키 |
+| `MODEL_NAME` | `model_name` | `gpt-4o-mini` | 사용할 모델 ID |
+| `VISION_ENABLED` | `vision_enabled` | `1` | Vision 이미지 첨부 활성화 |
+| `VISION_QUALITY` | `vision_quality` | `60` | 이미지 JPEG 품질 (1-100) |
+| `VISION_MAX_WIDTH` | `vision_max_width` | `1024` | 이미지 최대 너비 (px) |
+| `VISION_SNAPSHOT_COUNT` | `snapshot_count` | `5` | Vision 배치당 수집 이미지 수 |
+| `VISION_INTERVAL_SECONDS` | `snapshot_interval` | `30` | Vision 수집 간격 (초) |
 
-| 필드 | 타입 | 필수 여부 | 디폴트 | 설명 |
-|------|------|-----------|--------|------|
-| `provider` | enum | ❌ | `"openai"` | LLM 제공자 |
-| `model` | string | ❌ | `gpt-4o-mini` | 사용할 모델 ID (env `MODEL_NAME` 우선) |
-| `api_endpoint` | string | ❌ | `https://api.openai.com/v1` | API 엔드포인트 URL |
-| `temperature` | float | ❌ | `0.7` | 생성 온도 |
-
-### 6.2 provider 허용 값
-
-- `"openai"` — OpenAI 호환 API
-- 추가 제공자 확장 가능성: `"anthropic"`, `"gemini"` 등 (향후)
-
-### 6.3 api_endpoint / api_base_url
-
-- YAML 키: `api_endpoint` (LLMConfig 키: `api_base_url`로 자동 매핑)
-- `https://` 또는 `http://` 프리픽스 필수
-- `/v1` 경로 포함 권장 (OpenAI 호환 형식)
-- env var `API_BASE_URL`도 동일한 역할 (YAML 값이 우선)
-
-### 6.4 API key 관리
-
-- **YAML에는 평문 API 키를 포함하지 않음**
-- `.env`의 `LLM_API_KEY`에서 읽음
-- 이 분리 원칙을 문서화: 민감 정보는 `.env`, 구성 정보는 `spaces.yaml`
-
-### 6.5 추가 고려 사항
-
-- `max_tokens`: LLM 응답 길이 제한 (디폴트: 100, 한 문장 강제)
-- `language`: 프롬프트 출력 언어 (`ko` 디폴트, `en` 허용)
+- `cooldown_seconds=3.0`은 하드코딩 (env/YAML에서 변경 불가)
+- 실행 모드(`MODE`)는 `os.environ` 직접 참조 — LLMConfig 필드 아님
 
 ---
 
@@ -268,24 +249,19 @@ thresholds:
   distance: 50          # 중심점 간 거리 (px)
   speed_slow: 20        # 정지/천천히 이동 기준 (px/frame)
   speed_fast: 40        # 천천히/빠르게 이동 기준 (px/frame)
-
-# === LLM 설정 ===
-llm:
-  provider: openai
-  model: gpt-4o-mini
-  api_endpoint: https://api.openai.com/v1
-  temperature: 0.7
 ```
+
 
 ---
 
 ## 10. 구현 시 고려사항
 
-### 10.1 YAML 스키마 검증 라이브러리
+### 10.1 YAML 스키마 검증
 
-`pydantic` 또는 `cerberus` 등 스키마 검증 도구를 `config_manager.py`에서 사용할지 여부:
-- **권장:** `pydantic` — 타입 안전성 + 자동 유효성 검사 + 직관적인 에러 메시지
-- 위 스키마 정의를 pydantic 모델로 변환하는 작업이 추가로 필요
+현재 `config_manager.py`는 `pydantic` 없이 dict 파싱으로 동작한다.
+- 필드 누락 시 기본값 사용
+- 잘못된 키는 무시 (경고 로그 출력)
+- 추후 `pydantic` 도입 시 타입 안전성 + 자동 유효성 검사 + 직관적인 에러 메시지 가능
 
 ### 10.2 확장성
 

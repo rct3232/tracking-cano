@@ -19,15 +19,11 @@
 │    ├─ 실시간 모드: cv2.VideoCapture.read()              │
 │    └─ 오프라인 모드: 동일 API, 파일 기반                 │
 │         ↓                                               │
-│  Step 2: Detection (detector.py)                        │
-│    Input:  frame (np.ndarray), target_classes            │
-│    Output: List[BBox]                                   │
-│    Budget: ~30ms (YOLO26s, GPU 기준)                    │
+│  Step 2: Detection & Tracking (tracker.py)              │
+│    Input:  frame (np.ndarray), target_classes, frame_id  │
+│    Output: (List[TrackedBBox], List[TrackedBBox])        │
+│    Budget: ~112ms (YOLO26s, CPU) / ~68ms (YOLO26n, CPU) │
 │         ↓                                               │
-│  Step 3: Tracking (tracker.py)                          │
-│    Input:  prev_tracked, new_bboxes, frame_id            │
-│    Output: List[TrackedBBox]                            │
-│    Budget: ~5ms                                         │
 │         ↓                                               │
 │  Step 4a: Movement Analysis (analyzer.py)               │
 │    Input:  TrackedBBox, thresholds                      │
@@ -53,7 +49,7 @@
 
 ### 2.2 프레임 드롭 조건 및 백프레시 전략
 
-- **조건:** YOLO 추론이 예산(30ms)을 초과하는 경우 → 다음 프레임 스킵
+- **조건:** YOLO 추론이 지연을 유발하는 경우 → 다음 프레임 스킵
 - **전략:** `cv2.VideoCapture`의 큐가 M개(기본 5개) 이상 쌓이면 가장 오래된 프레임 버림
 - **이유:** 실시간 모드에서 지연 누적 방지가 최우선
 
@@ -191,7 +187,7 @@ def classify_with_hysteresis(speed, acceleration, direction_change,
 ```
 Step 1: tracker에서 현재 추적 중인 track_id의 bbox 추출
          ↓
-Step 2: detector에서 반환된 객체 중 interaction_target_classes로 필터링
+Step 2: tracker.update()에서 반환된 객체 중 interaction_classes로 필터링
          ↓
 Step 3: 거리 계산 먼저 (경량 연산)
          중심점 간 유클리드 거리 < distance_threshold → "NEARBY"
@@ -228,7 +224,7 @@ Python의 GIL(Global Interpreter Lock)로 인해, 순수 Python 연산은 스레
 
 | 단계 | 연산 특성 | GIL 영향 |
 |------|----------|---------|
-| YOLO 추론 (detector) | C++/CUDA 백엔드 | GIL 해제됨 → 스레드로 충분 |
+| YOLO 추론 (tracker.update) | C++/CUDA 백엔드 | GIL 해제됨 → 스레드로 충분 |
 | ByteTrack 매칭 (tracker) | Python + numpy | 부분적 GIL 영향 |
 | 분석 로직 (analyzer) | 순수 Python | GIL 병목 가능 |
 | LLM 호출 (nlp_logger) | 네트워크 I/O | 별도 처리 필요 |
@@ -293,7 +289,7 @@ python main.py --video <path> → VideoReader: 파일 오픈 → 프레임 수�
 
 ### 7.3 공유 로직
 
-`pipeline.py` 내부의 `detector → tracker → analyzer → logger` 흐름은 모드에 관계없이 동일해야 함 (DRY 원칙).
+`pipeline.py` 내부의 `tracker.update → analyzer → logger` 흐름은 모드에 관계없이 동일해야 함 (DRY 원칙). (detector는 tracker로 통합됨)
 
 ### 7.4 다중 카메라 혼합 모드 (Phase 2)
 

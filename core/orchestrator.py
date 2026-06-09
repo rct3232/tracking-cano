@@ -6,7 +6,6 @@ from typing import Callable, Dict, Optional
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
-_KEY_MAP = {"api_endpoint": "api_base_url", "model": "model_name", "temperature": "temperature"}
 from core.pipeline import Pipeline
 from nlp.logger import NLPLogger, SpaceLogger
 from utils.video import create_capture
@@ -127,9 +126,6 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
         for k, v in app_config.thresholds.items():
             if hasattr(thresholds, k):
                 setattr(thresholds, k, v)
-        for yaml_key, llm_attr in _KEY_MAP.items():
-            if yaml_key in app_config.llm:
-                setattr(llm, llm_attr, app_config.llm[yaml_key])
     model_path = camera.model_path or default_model_path or f"yolo26{camera.model_size}.pt"
     yolo = YOLOConfig(
         model_size=camera.model_size,

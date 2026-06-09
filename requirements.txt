@@ -4,4 +4,3 @@ pyyaml
 python-dotenv
 watchdog
 openai
-lap>=0.5.12

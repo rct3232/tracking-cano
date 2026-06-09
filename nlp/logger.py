@@ -76,7 +76,7 @@ class LLMCallDebouncer:
 
 
 class NLPLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs", output_dir: str = "/output"):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", output_dir: str = "output"):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -413,27 +413,6 @@ class NLPLogger:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
 
-    def log_appearance(self, tracked: TrackedBBox, camera_id: str = "cam_01", interaction_results: List[InteractionResult] | None = None) -> Optional[str]:
-        self._ensure_client()
-        if self.client is None:
-            return None
-        debounce_key = f"{camera_id}_{tracked.track_id}"
-        if not self.debouncer.should_call(debounce_key):
-            return None
-        self._queue.put(_LogTask([tracked], camera_id, interaction_results))
-        return None
-
-    def log_disappearance(self, track_id: int, class_name: str, camera_id: str = "cam_01") -> Optional[str]:
-        self._ensure_client()
-        if self.client is None:
-            return None
-        fake_tracked = TrackedBBox(
-            track_id=track_id, frame_id=0, x1=0, y1=0, x2=0, y2=0,
-            confidence=0.0, class_id=0, class_name=class_name,
-        )
-        self._queue.put(_LogTask([fake_tracked], camera_id, None))
-        return None
-
 
 def _angle_to_direction(speed: float, angle: float) -> str:
     if speed < 5:
@@ -460,12 +439,6 @@ def _state_to_movement(state, direction: str) -> str:
         return f"moving slowly {direction}" if direction not in ("stationary", "unknown") else "moving slowly"
     return "UNKNOWN"
 
-
-def _format_direction(direction: str) -> str:
-    """Simplify direction for natural language."""
-    if direction in ("stationary", "unknown"):
-        return ""
-    return direction
 
 
 SPACE_SYSTEM_PROMPT = (

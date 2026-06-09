@@ -12,7 +12,7 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 3. **지연 로드 원칙** — Tracker YOLO는 `_ensure_loaded()`로만 로드, `__init__`에서 로드 금지
 4. **LLM 직접 호출 금지** — 반드시 `LLMCallDebouncer`(cooldown=3s) 경유
 5. **환경변수 추가 시 양쪽 필수** — config.py + .env.example, 한쪽만 하면 버그
-6. **벤치마크 기록 의무** — bench_rtsp.py 실행 후 BENCHMARKS.md 갱신 필수
+6. **벤치마크 기록 의무** — bench.py 실행 후 BENCHMARKS.md 갱신 필수
 7. **Docker 실행 의무** — 로컬에서 `python main.py` 직접 실행 금지, 반드시 Docker로 실행.
 
 ## 핵심 파일
@@ -32,7 +32,6 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 
 1. `.env` 파일이 존재하는지 확인한다.
 2. 존재하지 않으면 `.env.example`을 읽어 아래 **핵심 변수**만 유저에게 입력받고, 나머지는 기본값을 그대로 사용한다:
-   - `RTSP_URL` — 카메라 RTSP 주소 (필수)
    - `API_KEY` — LLM API 키 (필수)
    - `API_BASE_URL` — LLM API 엔드포인트 (기본값: `https://api.openai.com/v1`)
    - `MODEL_NAME` — 사용할 LLM 모델명 (기본값: `gpt-4o-mini`)
