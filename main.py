@@ -43,11 +43,22 @@ def run_live(config: PipelineConfig, camera_source: str):
         return
 
     cam_id = camera_source.split("/")[-1] if "/" in camera_source else camera_source
-    logger.info("Live mode started: %s", camera_source)
+    mode = os.environ.get("MODE", "cv_pipeline")
+    logger.info("Live mode started: %s (mode=%s)", camera_source, mode)
     pipeline = Pipeline(config, f"cam_{cam_id}")
     frame_id = 0
     consecutive_failures = 0
     max_failures = 5
+
+    if mode == "llm_vision":
+        from collections import deque
+        import base64 as b64mod
+        buffer = deque(maxlen=config.llm.snapshot_count)
+        last_batch_time = time.monotonic()
+        snapshot_interval = config.llm.snapshot_interval
+    else:
+        buffer = None
+        snapshot_interval = 0
 
     try:
         while _running:
@@ -74,9 +85,27 @@ def run_live(config: PipelineConfig, camera_source: str):
                 continue
 
             consecutive_failures = 0
-            result = pipeline.process_frame(frame, frame_id)
-            if result:
-                logger.info("[cam_%s] %s", cam_id, result)
+
+            if mode == "llm_vision":
+                import cv2 as cv2_lib
+                now = time.monotonic()
+                if now - last_batch_time >= snapshot_interval:
+                    _, buf = cv2_lib.imencode(".jpg", frame, [cv2_lib.IMWRITE_JPEG_QUALITY, config.llm.vision_quality])
+                    image_b64 = b64mod.b64encode(buf).decode("utf-8")
+                    buffer.append(image_b64)
+                    logger.debug("[vision:%s] buffer_size=%d", cam_id, len(buffer))
+                    if len(buffer) >= config.llm.snapshot_count:
+                        batch = list(buffer)
+                        pipeline.nlp_logger.vision_log(
+                            batch, f"cam_{cam_id}",
+                            config.llm_system_prompt, config.target_classes,
+                        )
+                        last_batch_time = time.monotonic()
+                        buffer.popleft()
+                elif len(buffer) > 0:
+                    result = pipeline.process_frame(frame, frame_id)
+                    if result:
+                        logger.info("[cam_%s] %s", cam_id, result)
 
             frame_id += 1
     finally:
@@ -178,6 +207,9 @@ def main():
 
     if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
         logging.getLogger().setLevel(logging.DEBUG)
+
+    mode = os.environ.get("MODE", "cv_pipeline")
+    logger.info("Running in mode: %s", mode)
 
     config = PipelineConfig(
         target_classes=args.target_classes,

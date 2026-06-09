@@ -22,13 +22,6 @@ DEFAULT_THRESHOLDS = {
     "min_frames": 3,
 }
 
-DEFAULT_LLM = {
-    "provider": "openai",
-    "model": "gpt-4o-mini",
-    "api_endpoint": "https://api.openai.com/v1",
-    "temperature": 0.7,
-}
-
 # ── Data structures ────────────────────────────────────────────────
 
 class CameraConfig:
@@ -47,6 +40,7 @@ class CameraConfig:
         self.model_path: Optional[str] = cfg.get("model_path", None)
         self.quantize: bool = cfg.get("quantize", False)
         self.frame_skip: int = cfg.get("frame_skip", 0)
+        self.llm_system_prompt: Optional[str] = cfg.get("llm_system_prompt", None)
 
     def __repr__(self) -> str:
         return f"CameraConfig(id={self.id!r}, source={self.source!r}, status={self.status!r})"
@@ -59,6 +53,7 @@ class SpaceConfig:
         self.id: str = cfg["id"]
         self.name: str = cfg.get("name", self.id)
         self.camera_ids: List[str] = cfg.get("cameras", [])
+        self.llm_system_prompt: Optional[str] = cfg.get("llm_system_prompt", None)
 
     def __repr__(self) -> str:
         return f"SpaceConfig(id={self.id!r}, name={self.name!r})"
@@ -155,13 +150,11 @@ def _parse_thresholds(raw: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 def _parse_llm(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse LLM config, falling back to defaults."""
+    """Parse LLM config — only keys explicitly set in YAML."""
     raw_llm = raw.get("llm", {})
     if not isinstance(raw_llm, dict):
         raise ValueError("'llm' must be a mapping")
-    result = dict(DEFAULT_LLM)
-    result.update(raw_llm)
-    return result
+    return raw_llm
 
 
 # ── Diff ────────────────────────────────────────────────────────────

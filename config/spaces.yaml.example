@@ -4,6 +4,9 @@ cameras:
     source: rtsp://admin:admin@192.168.0.100:554/stream   # RTSP URL
     status: active                                          # active | inactive
     target_classes: [cat, person]                           # COCO 클래스명
+    # llm_system_prompt: |                                  # LLM Vision-Only 모드에서 사용
+    #   You are a security monitor. Track all objects in target_classes.
+    #   Describe their behavior and interactions in the scene.
   - id: hallway
     source: rtsp://admin:admin@192.168.0.101:554/stream
     status: active
@@ -18,7 +21,13 @@ cameras:
 # spaces:
 #   - id: room_living
 #     name: 거실
+#     llm_system_prompt: |                                    # Space-level prompt (우선순위 높음)
+#       Analyze the entire living room. Track people and pets across all camera views.
 #     cameras: [cam_01]
+
+#   - id: hallway                                            # space prompt 없음 → 기본 VISION_SPACE_SYSTEM_PROMPT 사용
+#     name: 복도
+#     cameras: [hall_front, hall_back]
 
 # === 임계값 설정 (선택 — 생략 시 디폴트 적용) ===
 # thresholds:

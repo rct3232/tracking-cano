@@ -8,7 +8,7 @@ from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
 _KEY_MAP = {"api_endpoint": "api_base_url", "model": "model_name", "temperature": "temperature"}
 from core.pipeline import Pipeline
-from nlp.logger import SpaceLogger
+from nlp.logger import NLPLogger, SpaceLogger
 from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,7 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
         thresholds=thresholds,
         yolo=yolo,
         llm=llm,
+        llm_system_prompt=camera.llm_system_prompt,
     )
 
 
@@ -162,10 +163,18 @@ class Orchestrator:
         if self.space_logger:
             for space in app_config.spaces:
                 self.space_logger.set_camera_count(space.id, len(space.camera_ids))
+        self._vision_nlp_logger: Optional[NLPLogger] = None
+        self._flush_stop_event: threading.Event | None = None
+        self._flush_thread: Optional[threading.Thread] = None
 
     @property
     def spaces(self) -> list[SpaceConfig]:
         return self.app_config.spaces
+
+    def _ensure_vision_nlp(self, llm_config):
+        if self._vision_nlp_logger is None:
+            from nlp.logger import NLPLogger as NLPLoggerCls
+            self._vision_nlp_logger = NLPLoggerCls(llm_config)
 
     @property
     def all_finished(self) -> bool:
@@ -179,6 +188,39 @@ class Orchestrator:
                 continue
             self.add_camera(cam)
 
+    # Start periodic vision flush thread
+        from os import environ
+        mode = environ.get("MODE", "cv_pipeline")
+        logger.debug("[init] MODE=%s space_logger=%r all_spaces=%d", mode, self.space_logger is not None, len(self.app_config.spaces))
+        if mode == "llm_vision" and self.space_logger:
+            self._flush_stop_event = threading.Event()
+            interval = float(environ.get("VISION_INTERVAL_SECONDS", "30"))
+            self._flush_thread = threading.Thread(
+                target=self._vision_flush_loop, args=(self._flush_stop_event, interval), daemon=True, name="vision-flush"
+            )
+            self._flush_thread.start()
+
+    def _vision_flush_loop(self, stop_event: threading.Event, interval: float):
+        logger.debug("[flush-loop] started with interval=%ds", int(interval))
+        while not stop_event.is_set():
+            if stop_event.wait(timeout=interval):
+                break
+            logger.debug("[flush-loop] cycle start")
+            for space in self.app_config.spaces:
+                llm_prompt = space.llm_system_prompt or None
+                all_target_classes = list(dict.fromkeys(
+                    cls for c in self.app_config.cameras
+                    if self._cam_to_space.get(c.id) == space.id and c.target_classes
+                    for cls in c.target_classes
+                ))
+                text = self.space_logger.flush_vision(
+                    space.id, space.name, self._vision_nlp_logger,  # type: ignore[arg-type]
+                    llm_prompt, all_target_classes or None,
+                    space.camera_ids,
+                )
+                if text and '"target_present": true' in text:
+                    logger.info("[space:%s][vision] %s", space.id, text)
+
     def add_camera(self, camera: CameraConfig):
         space_id = self._cam_to_space.get(camera.id)
         cap = create_capture(camera.source)
@@ -188,14 +230,54 @@ class Orchestrator:
         config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
         pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
         stop_event = threading.Event()
-        worker = _CameraWorker(
-            camera.id, pipeline, cap, camera.source, stop_event, camera.frame_skip,
-            on_finished=self.worker_finished,
-        )
+        from os import environ
+        mode = environ.get("MODE", "cv_pipeline")
+        if mode == "llm_vision":
+            from core.vision_worker import _VisionOnlyWorker
+            self._ensure_vision_nlp(config.llm)
+
+            space_id = self._cam_to_space.get(camera.id)
+            if space_id and self.space_logger:
+                # Space-aware aggregator 경로 — 버퍼 업데이트만 (LLM 호출 없음)
+                worker = _VisionOnlyWorker(
+                    camera_id=camera.id,
+                    source=camera.source,
+                    stop_event=stop_event,
+                    frame_skip=camera.frame_skip,
+                    snapshot_count=config.llm.snapshot_count,
+                    vision_quality=config.llm.vision_quality,
+                    vision_max_width=config.llm.vision_max_width,
+                    on_batch_ready=lambda **kw: self.space_logger.vision_collect(
+                        space_id, kw["camera_id"], kw["images"]
+                    ),
+                )
+            else:
+                # 기존 직접 LLM 호출 경로 (space 없는 카메라)
+                worker = _VisionOnlyWorker(
+                    camera_id=camera.id,
+                    source=camera.source,
+                    stop_event=stop_event,
+                    frame_skip=camera.frame_skip,
+                    snapshot_count=config.llm.snapshot_count,
+                    snapshot_interval=config.llm.snapshot_interval,
+                    vision_quality=config.llm.vision_quality,
+                    vision_max_width=config.llm.vision_max_width,
+                    on_batch_ready=lambda **kw: self._vision_nlp_logger.vision_log(  # type: ignore[union-attr]
+                        kw["images"], kw["camera_id"],
+                        camera.llm_system_prompt, camera.target_classes,
+                    ),
+                    llm_system_prompt=camera.llm_system_prompt,
+                    target_classes=camera.target_classes,
+                )
+        else:
+            worker = _CameraWorker(
+                camera.id, pipeline, cap, camera.source, stop_event, camera.frame_skip,
+                on_finished=self.worker_finished,
+            )
         with self._lock:
             self._workers[camera.id] = worker
         worker.start()
-        logger.info("Camera %s started (%s, space=%s)", camera.id, camera.source, space_id)
+        logger.info("Camera %s started (%s, space=%s, mode=%s)", camera.id, camera.source, space_id, mode)
 
     def worker_finished(self, camera_id: str):
         with self._lock:
@@ -242,6 +324,8 @@ class Orchestrator:
                 logger.info("[%s] %s", space.id, text)
 
     def stop(self):
+        if self._flush_stop_event:
+            self._flush_stop_event.set()
         with self._lock:
             workers = list(self._workers.values())
         for w in workers:

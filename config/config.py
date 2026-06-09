@@ -44,6 +44,9 @@ class LLMConfig:
     vision_enabled: bool = field(default_factory=lambda: os.getenv("VISION_ENABLED", "1") == "1")
     vision_quality: int = field(default_factory=lambda: int(os.getenv("VISION_QUALITY", "60")))
     vision_max_width: int = field(default_factory=lambda: int(os.getenv("VISION_MAX_WIDTH", "1024")))
+    mode: str = field(default_factory=lambda: os.getenv("MODE", "cv_pipeline"))
+    snapshot_count: int = field(default_factory=lambda: int(os.getenv("VISION_SNAPSHOT_COUNT", "5")))
+    snapshot_interval: float = field(default_factory=lambda: float(os.getenv("VISION_INTERVAL_SECONDS", "30")))
 
 
 @dataclass
@@ -53,3 +56,4 @@ class PipelineConfig:
     thresholds: Thresholds = field(default_factory=Thresholds)
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    llm_system_prompt: Optional[str] = None
