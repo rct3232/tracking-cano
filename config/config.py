@@ -44,6 +44,11 @@ class LLMConfig:
     vision_max_width: int = field(default_factory=lambda: int(os.getenv("VISION_MAX_WIDTH", "1024")))
     snapshot_count: int = field(default_factory=lambda: int(os.getenv("VISION_SNAPSHOT_COUNT", "5")))
     snapshot_interval: float = field(default_factory=lambda: float(os.getenv("VISION_INTERVAL_SECONDS", "30")))
+    collect_interval: float = field(default_factory=lambda: float(os.getenv("VISION_COLLECT_INTERVAL", "0.5")))
+    collect_count: int = field(default_factory=lambda: int(os.getenv("VISION_COLLECT_COUNT", "5")))
+    max_stale_threshold: float = field(default_factory=lambda: float(os.getenv("VISION_MAX_STALE", "10.0")))
+    cooldown_seconds: float = field(default_factory=lambda: float(os.getenv("VISION_COOLDOWN_SECONDS", "30.0")))
+    early_trigger: float = field(default_factory=lambda: float(os.getenv("VISION_EARLY_TRIGGER", "5.0")))
 
 
 @dataclass

@@ -185,7 +185,8 @@ class NLPLogger:
 
     def _process_vision_batch_space(self, images: List[tuple[str, str]], space_name: str,
                                      llm_system_prompt: str | None, target_classes: List[str] | None,
-                                     valid_camera_ids: List[str] | None = None):
+                                     valid_camera_ids: List[str] | None = None,
+                                     camera_health: Dict[str, str] | None = None):
         self._ensure_client()
         if self.client is None:
             return None
@@ -195,7 +196,9 @@ class NLPLogger:
         user_messages = [{"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"}]
 
         current_cam = None
+        seen_cameras: set[str] = set()
         for cam_id, img_b64 in images:
+            seen_cameras.add(cam_id)
             if cam_id != current_cam:
                 user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---"})
                 current_cam = cam_id
@@ -203,6 +206,18 @@ class NLPLogger:
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
             })
+
+        if camera_health:
+            for cam_id in sorted(camera_health):
+                if cam_id in seen_cameras:
+                    continue
+                health = camera_health[cam_id]
+                if health == "degraded":
+                    user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---\n[stale image — no fresh frame available]"})
+                    seen_cameras.add(cam_id)
+                elif health == "dead":
+                    user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---\n[camera offline]"})
+                    seen_cameras.add(cam_id)
 
         if target_classes:
             unique_classes = list(dict.fromkeys(target_classes))
@@ -244,12 +259,14 @@ class NLPLogger:
 
         parsed = self._parse_json_response(text, space_name)
         if not parsed:
-            logger.debug("[vision:%s] parse failed, raw response: %s", space_name, text[:200])
+            logger.warning("[vision:%s] parse failed, raw: %s", space_name, text[:400])
             return None
 
         target_present = parsed.get("target_present", False)
         cameras = parsed.get("cameras", {})
         reasoning = parsed.get("reasoning", "")
+        if not reasoning:
+            logger.warning("[vision:%s] reasoning field missing in LLM response", space_name)
 
         logger.debug("[vision:%s] parsed: target=%r cameras_keys=%r", space_name, target_present, list(cameras.keys()))
 
@@ -284,25 +301,85 @@ class NLPLogger:
 
     @staticmethod
     def _parse_json_response(text: str, context: str = "") -> Optional[Dict]:
-        for attempt in [text, text.strip("```json").strip("`")]:
+        import re
+        candidates = [text]
+        stripped = text.strip()
+        if stripped != text:
+            candidates.append(stripped)
+        for fence in ["```json", "```JSON", "```"]:
+            if fence in text:
+                parts = text.split(fence, 1)
+                if len(parts) > 1:
+                    after_fence = parts[1].rsplit("```", 1)[0].strip()
+                    candidates.append(after_fence)
+        for t in candidates:
             try:
-                parsed = json.loads(attempt)
+                parsed = json.loads(t)
                 if isinstance(parsed, dict):
                     return parsed
             except (json.JSONDecodeError, TypeError):
                 continue
-        import re
-        fixed = re.sub(r',\s*}', '}', text)
-        fixed = re.sub(r',\s*\]', ']', fixed)
-        try:
-            parsed = json.loads(fixed)
-            if isinstance(parsed, dict):
-                logger.warning("[parse_json] Recovered from malformed JSON via trailing comma fix. context=%s", context or "unknown")
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        logger.warning("[parse_json] Failed to parse LLM output as JSON. context=%s", context or "unknown")
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            extracted = m.group(0)
+            for cleaned in [extracted, re.sub(r',\s*}', '}', extracted), re.sub(r',\s*\]', ']', extracted)]:
+                try:
+                    parsed = json.loads(cleaned)
+                    if isinstance(parsed, dict):
+                        logger.warning("[parse_json] Recovered via regex extraction. context=%s", context or "unknown")
+                        return parsed
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        logger.warning("[parse_json] Failed to parse LLM output as JSON. context=%s, text=%r", context or "unknown", text[:500])
         return None
+
+    def vision_detect(self, camera_id: str, image_b64: str, llm_system_prompt: str | None,
+                       target_classes: list[str] | None) -> dict | None:
+        """Synchronous single-image detection call. No debounce (caller manages timing)."""
+        self._ensure_client()
+        if self.client is None:
+            return None
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        context = [f"Timestamp: {timestamp}", f"Camera: {camera_id}"]
+        if target_classes:
+            context.append(f"Target objects: {', '.join(target_classes)}")
+        context.append("\nDetermine if any target object is present in this single image.")
+        context_prompt = "\n".join(context)
+
+        user_messages = [
+            {"type": "text", "text": context_prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+        ]
+
+        parts = [DETECT_SYSTEM_PROMPT]
+        if llm_system_prompt:
+            parts.append(f"Additional instructions:\n{llm_system_prompt}")
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[
+                    {"role": "system", "content": "\n".join(parts)},
+                    {"role": "user", "content": user_messages},
+                ],
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+            text = response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error("Vision detect LLM call failed for %s: %s", camera_id, e)
+            return None
+
+        parsed = self._parse_json_response(text, f"detect_{camera_id}")
+        if not parsed:
+            logger.debug("[detect:%s] parse failed, raw: %s", camera_id, text[:200])
+            return None
+
+        target_present = parsed.get("target_present", False)
+        reasoning = parsed.get("reasoning", "")
+        logger.info("[detect:%s] target_present=%s reason=%s", camera_id, target_present, reasoning)
+        return parsed
 
     def stop(self):
         self._stop_event.set()
@@ -448,6 +525,19 @@ SPACE_SYSTEM_PROMPT = (
     "No emotions, no speculation. Output exactly ONE sentence."
 )
 
+DETECT_SYSTEM_PROMPT = (
+    "You are a target detection specialist. Your task is to determine whether a specific "
+    "target object is present in a single image.\n\n"
+    "RULES:\n"
+    "1) Look for the target objects listed in 'Target objects:'. If none listed, detect any living creature.\n"
+    "2) If the target is visible (even partially, e.g. a tail, paw, or ear peeking from behind furniture), "
+    "set target_present to true.\n"
+    "3) Do NOT confuse inanimate objects (toys, cushions, shadows) with the living target.\n"
+    "4) When in doubt, default to false. Never guess.\n\n"
+    'OUTPUT: Respond with ONLY valid JSON: {"target_present": true/false, "reasoning": "one sentence summary"}\n'
+    "No markdown, no code fences, no trailing commas.\n"
+)
+
 VISION_SPACE_SYSTEM_PROMPT = (
     "You are an object behavior observation specialist analyzing a space from multiple camera angles. "
     "Each group of images is labeled with its camera ID in brackets, e.g. '[livingroom]'. "
@@ -466,8 +556,14 @@ VISION_SPACE_SYSTEM_PROMPT = (
     "But do not dismiss a real partially-hidden animal as an inanimate object.\n"
     "- When in doubt, default to false. Never guess.\n"
 
-    "\n\nOUTPUT FORMAT:\n"
-    "Respond with ONLY valid JSON. No markdown, no code fences, no trailing commas.\n"
+    "\n\nOUTPUT FORMAT (REQUIRED FIELDS):\n"
+    "Your response must be ONLY valid JSON. No markdown, no code fences, no trailing commas, "
+    "no additional text before or after the JSON object.\n\n"
+    "REQUIRED fields in your JSON:\n"
+    '- "target_present": true or false (REQUIRED — you MUST include this)\n'
+    '- "cameras": object with camera IDs as keys (REQUIRED — one entry per camera)\n'
+    '- "reasoning": string (REQUIRED — you MUST include this field. '
+    'One short sentence summarizing your conclusion.)\n\n'
 
     "Example when target IS present:\n"
     '{\n'
@@ -488,8 +584,6 @@ VISION_SPACE_SYSTEM_PROMPT = (
     '  },\n'
     '  "reasoning": "No living cat visible from any camera; only inanimate objects present."\n'
     "}\n"
-
-    "\n4) REASONING: One short sentence summarizing your conclusion.\n"
 )
 
 
@@ -535,23 +629,31 @@ class SpaceLogger:
 
     def flush_vision(self, space_id: str, space_name: str, nlp_logger: "NLPLogger",
                         llm_system_prompt: str | None = None, target_classes: List[str] | None = None,
-                        valid_camera_ids: List[str] | None = None):
-        """공통 타이머가 주기적으로 호출 — 모든 카메라의 최신 이미지를 취합해 LLM 제출"""
-        logger.debug("[flush_vision] called space_id=%s entries_count=%d", space_id, len(self._vision_buffer.get(space_id, {})))
-        with self._lock:
-            entries = self._vision_buffer.get(space_id, {})
+                        valid_camera_ids: List[str] | None = None,
+                        camera_health: Dict[str, str] | None = None,
+                        override_images: List[tuple[str, str]] | None = None):
+        """Submit all camera images for space-level LLM analysis.
 
-            # 버퍼에 이미지가 없으면 스킵
-            if not entries:
+        Two call paths:
+        - Periodic timer (legacy): reads from self._vision_buffer
+        - Scheduler (new): caller provides override_images + camera_health directly
+        """
+        logger.debug("[flush_vision] called space_id=%s", space_id)
+        if override_images is not None:
+            all_images = override_images
+            if not all_images and not camera_health:
                 return None
-
-            all_images: List[tuple[str, str]] = []
-            for cam_id in sorted(entries.keys()):
-                entry = entries[cam_id]
-                for img in entry["images"]:
-                    all_images.append((cam_id, img))
-                # 제출 태그 업데이트
-                entry["submitted"] = True
+        else:
+            with self._lock:
+                entries = self._vision_buffer.get(space_id, {})
+                if not entries:
+                    return None
+                all_images = []
+                for cam_id in sorted(entries.keys()):
+                    entry = entries[cam_id]
+                    for img in entry["images"]:
+                        all_images.append((cam_id, img))
+                    entry["submitted"] = True
 
         if not nlp_logger.debouncer.should_call(f"{space_id}_vision"):
             logger.debug("[space:%s][vision] debounce suppress", space_id)
@@ -561,6 +663,7 @@ class SpaceLogger:
             images=all_images, space_name=space_name,
             llm_system_prompt=llm_system_prompt, target_classes=target_classes,
             valid_camera_ids=valid_camera_ids,
+            camera_health=camera_health,
         )
 
     def flush(self, space_id: str, space_name: str) -> Optional[str]:
