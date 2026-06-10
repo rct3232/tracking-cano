@@ -5,6 +5,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
+import cv2
+
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
@@ -97,25 +99,25 @@ class _VisionScheduler:
                         state.state = "detecting"
                         state.detect_idx = 0
                 if state.state == "detecting":
-                    self._process_detection_step(state, now)
+                    self._process_detection_step(state)
                 elif state.state == "logging":
                     pass
             self._stop_event.wait(0.1)
 
-    def _get_camera_health(self, cam_id: str, now: float) -> tuple[str, str | None]:
+    def _get_camera_health(self, cam_id: str) -> tuple[str, str | None]:
         collector = self._collectors.get(cam_id)
         if collector is None or not collector.buffer:
             return "dead", None
         entry = collector.buffer[-1]
-        age = now - entry.captured_at
+        age = time.monotonic() - entry.captured_at
         if age > self._config.max_stale_threshold:
             return "degraded", None
         return "healthy", entry.image_b64
 
-    def _process_detection_step(self, state: _SpaceState, now: float):
+    def _process_detection_step(self, state: _SpaceState):
         while state.detect_idx < len(state.camera_ids):
             cam_id = state.camera_ids[state.detect_idx]
-            health, image_b64 = self._get_camera_health(cam_id, now)
+            health, image_b64 = self._get_camera_health(cam_id)
             if health != "healthy" or image_b64 is None:
                 logger.debug("[space:%s] cam=%s %s skip", state.id, cam_id, health)
                 state.detect_idx += 1
@@ -134,7 +136,7 @@ class _VisionScheduler:
 
             if result.get("target_present", False):
                 logger.info("[space:%s] cam=%s target_present=True → immediate logging", state.id, cam_id)
-                self._transition_to_logging(state, now, detect_cam_id=cam_id, detect_image_b64=image_b64)
+                self._transition_to_logging(state, detect_cam_id=cam_id, detect_image_b64=image_b64)
                 return
 
             state.detect_idx += 1
@@ -143,19 +145,20 @@ class _VisionScheduler:
         logger.debug("[space:%s] all cameras done, no target → immediate restart", state.id)
         state.detect_idx = 0
 
-    def _transition_to_logging(self, state: _SpaceState, now: float,
+    def _transition_to_logging(self, state: _SpaceState,
                                detect_cam_id: str | None = None,
                                detect_image_b64: str | None = None):
         logger.info("[space:%s] target found → logging + cooling", state.id)
         state.state = "logging"
 
+        now = time.monotonic()
         cooldown_duration = self._config.cooldown_seconds - self._config.early_trigger
         state.cooldown_until = now + max(cooldown_duration, 0)
 
         images: List[tuple[str, str]] = []
         camera_health: Dict[str, str] = {}
         for cam_id in state.camera_ids:
-            health, image_b64 = self._get_camera_health(cam_id, now)
+            health, image_b64 = self._get_camera_health(cam_id)
             camera_health[cam_id] = health
             if cam_id == detect_cam_id and detect_image_b64 is not None:
                 image_b64 = detect_image_b64
@@ -219,6 +222,7 @@ class _CameraWorker:
             fps_log_interval = 5.0
             fps_frame_count = 0
             last_fps_log = time.perf_counter()
+            connect_wall = time.monotonic()
             while not self.stop_event.is_set():
                 ret, frame = self.cap.read()
                 if not ret:
@@ -236,6 +240,7 @@ class _CameraWorker:
                                 continue
                             self.cap = new_cap
                             consecutive_failures = 0
+                            connect_wall = time.monotonic()
                         else:
                             time.sleep(0.5)
                         continue
@@ -243,6 +248,13 @@ class _CameraWorker:
                         logger.info("Camera %s video ended (%s)", self.camera_id, self.source)
                         break
                 consecutive_failures = 0
+                pts_ms = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+                if pts_ms > 0:
+                    lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
+                    if lag_ms > 60_000:
+                        logger.warning("[%s] PTS lag=%.0fms > 60s, forcing reconnect", self.camera_id, lag_ms)
+                        consecutive_failures = max_failures
+                        continue
                 if frame_id % skip_interval == 0:
                     t0 = time.perf_counter()
                     result = self.pipeline.process_frame(frame, frame_id)

@@ -29,6 +29,33 @@ SYSTEM_PROMPT = (
 - **금지 사항:** 추측, 감정어, 확인되지 않은 정보
 - **길이 제한:** 최대 150 tokens (`max_tokens=150`)
 
+### 2.2 Vision Detect 프롬프트 — Layer 2 detection 전용
+
+```python
+DETECT_SYSTEM_PROMPT = (
+    "You are a target detection assistant. "
+    "Analyze the image and determine if the target object(s) are present. "
+    "If any target is present, return a JSON object with 'target_found': true, "
+    "'target_classes': [list of detected class names], 'target_coordinate': "
+    "[x1, y1, x2, y2] normalized 0~1 (tight bounding box, 2-3 decimal places), "
+    "and 'description': 'concise one-sentence observation'. "
+    "If no target is found, return {'target_found': false, 'description': 'No target detected.'}. "
+    "Return ONLY valid JSON, no markdown, no code fences."
+)
+```
+
+### 2.3 Vision Space 종합 프롬프트 — 다중 카메라 vision + text 종합
+
+```python
+VISION_SPACE_SYSTEM_PROMPT = (
+    ...
+    # Per-camera detection results + camera health + bbox annotations
+    # Synthesizes multi-camera vision observations into one coherent sentence
+)
+```
+
+자세한 템플릿 구조는 섹션 8 참조.
+
 ---
 
 ## 3. 단일 카메라 상태 보고용 프롬프트 템플릿
@@ -258,3 +285,75 @@ state_change:
 - 동일 패턴의 LLM 응답을 캐시하는 것은 현재 설계에서는 구현하지 않음
 - 이유: 상태 변화는 매번 다른 객체/상황에 발생하므로 캐시 히트율이 낮을 것으로 예상
 - Phase 4에서 필요 시 도입 가능
+
+---
+
+## 8. Vision Detect 파이프라인
+
+### 8.1 전체 흐름
+
+```
+Layer 1 (_BatchCollector)            Layer 2 (_VisionScheduler)
+┌──────────────────────┐            ┌────────────────────────────┐
+│ 0.5s timer로 캡처      │            │ DETECTING 상태 진입         │
+│ buffer에 저장 (maxlen=5)│            │ → camera별 buffer 최신 entry │
+└──────────────────────┘            │ → NLPLogger.vision_detect() │
+                                    │   (DETECT_SYSTEM_PROMPT)    │
+                                    │ ↓                          │
+                                    │ target_found=true?          │
+                                    │ ├─ Yes: transition to       │
+                                    │ │  LOGGING+COOLING          │
+                                    │ │  → SpaceLogger            │
+                                    │ │   .flush_vision()         │
+                                    │ │   (VISION_SPACE_           │
+                                    │ │    SYSTEM_PROMPT)         │
+                                    │ └─ No: immediate restart    │
+                                    │    DETECTING                │
+                                    └────────────────────────────┘
+```
+
+### 8.2 vision_detect() — 단일 이미지 detection 호출
+
+- **프롬프트:** `DETECT_SYSTEM_PROMPT` (2.2절)
+- **입력:** base64 인코딩 이미지 1장 + `target_classes`
+- **출력:** JSON (`target_found`, `target_classes[]`, `target_coordinate`, `description`)
+- **특징:** 디바운스 없음 (호출자가 타이밍 관리), 동기 호출
+- **실패 처리:** LLM 호출 실패 또는 JSON 파싱 실패 시 `None` 반환 → caller가 false detection으로 간주
+
+```python
+# 예시 vision_detect() 호출
+result = nlp_logger.vision_detect(
+    camera_id="cam_01",
+    image_b64="base64_encoded_jpeg...",
+    llm_system_prompt=DETECT_SYSTEM_PROMPT,
+    target_classes=["cat"],
+)
+# result 예시:
+# {"target_found": true, "target_classes": ["cat"],
+#  "target_coordinate": [0.12, 0.34, 0.45, 0.56],
+#  "description": "A cat is sitting on the floor near the sofa."}
+```
+
+### 8.3 flush_vision() — 다중 카메라 vision 결과 종합
+
+- **프롬프트:** `VISION_SPACE_SYSTEM_PROMPT` (2.3절)
+- **입력:** 각 카메라의 `(camera_id, image_b64, captured_wall_clock)` 튜플 리스트 + `camera_health`
+- **출력:** 종합 자연어 문장 1개
+- **디바운스 키:** `f"{space_id}_vision"` — cooldown = `cooldown_seconds - early_trigger`
+- **Bbox 시각화:** LLM 응답에 `target_coordinate` 포함 시 `draw_normalized_bbox()`로 이미지 저장
+
+### 8.4 Camera health가 프롬프트에 미치는 영향
+
+| Health 상태 | 이미지 포함 | 텍스트 annotation |
+|-------------|-----------|------------------|
+| `healthy` | O | 정상 detection 결과 포함 |
+| `degraded` | X | `"(degraded: stale image)"` 추가 |
+| `dead` | X | `"(camera disconnected)"` 추가 |
+
+### 8.5 디바운스 키 정리
+
+| 구분 | 키 패턴 | 쿨다운 | 설명 |
+|------|---------|--------|------|
+| 단일 카메라 (텍스트) | `NLPLogger`: `f"{camera_id}_batch"` | `cooldown_seconds` (3s) | 이동 상태 변화 보고 |
+| 다중 카메어 공간 (텍스트) | `SpaceLogger`: space_id | `cooldown_seconds` (3s) | 공간 종합 텍스트 요약 |
+| 다중 카메라 공간 (vision) | `SpaceLogger`: `f"{space_id}_vision"` | `cooldown_seconds - early_trigger` | Vision detection + 공간 종합 |

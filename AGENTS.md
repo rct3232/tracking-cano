@@ -1,9 +1,12 @@
 # AGENTS.md — tracking-cano
 
 ## 프로젝트 개요
-Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector → NLPLogger → SpaceLogger → LLM
-- Orchestrator: `_CameraWorker`(daemon thread)로 다중 카메라 관리, stream은 5회 실패 시 재시작, file/디렉토리는 단발
-- SpaceLogger: 동일 공간 카메라 로그 취합 → 주기적 flush(10s) + 이벤트 기반 try_flush()로 LLM 요약
+Layer 1: Camera → `_BatchCollector`(0.5s timer, buffer maxlen=5) → Layer 2: `_VisionScheduler`(per-space state machine: DETECTING→LOGGING+COOLING)
+Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector → NLPLogger → SpaceLogger → LLM
+- Orchestrator: `_CameraWorker`(daemon thread)로 다중 카메라 관리 + `_VisionScheduler`(100ms polling, space별 state machine)
+- Layer 1: `_BatchCollector` — per-camera daemon, timer 기반 encode+버퍼링, reconnect 시 buffer.clear()
+- Layer 2: `_VisionScheduler` — per-space DETECTING→LOGGING+COOLING, camera health(healthy/degraded/dead) 추적
+- SpaceLogger: 동일 공간 카메라 로그 취합 → 주기적 flush(10s) + 이벤트 기반 try_flush() + vision flush_vision()
 
 ## Commandments
 0. **디버깅 시 DEBUG 로깅 필수** — 문제 진단이 필요한 경우 반드시 `--verbose`/`-v`(또는 `LOG_LEVEL=DEBUG`)를 추가하여 실행하고, `docker logs`(또는 stdout) 출력에서 증거를 수집할 것. 추측으로 원인을 단정하지 말 것.
@@ -19,14 +22,16 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 | 파일 | 역할 |
 |------|------|
 | `core/pipeline.py` | `process_frame()` → state hold + disappear/interaction change 감지 |
-| `core/orchestrator.py` | `_CameraWorker`(daemon, 재연결), `flush_spaces()`, `diff_configs()` hot-reload |
+| `core/orchestrator.py` | `_CameraWorker`(daemon, 재연결), `_VisionScheduler`, `flush_spaces()`, `diff_configs()` hot-reload |
+| `core/vision_worker.py` | `_BatchCollector` — Layer 1 timer-based capture, sliding buffer, reconnect 시 buffer.clear() |
 | `modules/tracker.py` | YOLO+ByteTrack, `_ensure_loaded()` 지연로드, HybridDetector(tile fallback) |
 | `modules/analyzer.py` | `classify_movement()` → STOPPED/SLOW/FAST/DASH/ROTATE |
 | `modules/interaction_detector.py` | IoU+거리 기반: interacting/contact/nearby |
-| `nlp/logger.py` | `LLMCallDebouncer`(3s), `SpaceLogger`, `try_flush()` |
+| `nlp/logger.py` | `LLMCallDebouncer`(3s), `NLPLogger.vision_detect()`, `SpaceLogger`, `try_flush()`, `flush_vision()` |
 | `config/config.py` | Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses |
 | `config/config_manager.py` | YAML 로딩, `diff_configs()`, watchdog hot-reload |
 | `utils/video.py` | `create_capture()`, `resolve_source()` |
+| `utils/image.py` | `draw_normalized_bbox()` — LLM 응답 bbox 시각화 |
 
 ## Docker 실행 절차
 
@@ -42,3 +47,5 @@ Camera → YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector �
 ## Gotchas (2026-05 기준)
 - `--multi` 플래그 없음. `--live` 단독 인자 = multi mode
 - 타입 힌트 혼용 중: `Optional[str]`(old) vs `str \| None`(new). 기존 파일 스타일 유지
+- `LLMConfig.cooldown_seconds` 중복 선언: 하드코딩된 3.0s가 `VISION_COOLDOWN_SECONDS`(기본 30.0)로 override됨 — vision logging 후 일반 텍스트 LLM도 30s 쿨다운 적용됨 (버그 가능성 있음)
+- `VISION_MAX_STALE`(`max_stale_threshold`)는 config에 선언되어 있으나 현재 `_BatchCollector`에서 사용되지 않음 — age-based eviction 미구현

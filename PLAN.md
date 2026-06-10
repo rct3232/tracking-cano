@@ -1,4 +1,6 @@
-# PLAN.md — Vision LLM Pipeline Upgrade
+# PLAN.md — Vision LLM Pipeline Upgrade (✅ COMPLETED)
+
+All 8 phases of the Vision 2-Layer Architecture upgrade are completed. No active development in progress.
 
 ## SPEC
 

@@ -28,6 +28,7 @@ thresholds:   # 객체  — 임계값 설정 (선택적, 디폴트 존재)
 | `id` | string | ✅ | — | 공간 고유 식별자 |
 | `name` | string | ❌ | `id` 값과 동일 | 표시용 이름 (한글/영어 모두 허용) |
 | `cameras` | array[string] | ✅ | — | 소속 카메라 ID 목록 |
+| `llm_system_prompt` | string | ❌ | `VISION_SPACE_SYSTEM_PROMPT` | Space-level vision detection system prompt override |
 
 ### 3.2 유효성 규칙
 
@@ -60,6 +61,7 @@ spaces:
 | `source` | string | ✅ | — | 영상 소스 경로/주소 |
 | `status` | enum | ❌ | `"active"` | 활성화 여부 |
 | `target_classes` | array[string] | ❌ | `[cat, person]` | 추적 대상 COCO 클래스 |
+| `interaction_classes` | array[string] | ❌ | 모든 감지 클래스 | 상호작용 대상 COCO 클래스 필터 (선택) |
 
 ### 4.2 source의 타입 구분 방식
 
@@ -155,8 +157,13 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 | `VISION_MAX_WIDTH` | `vision_max_width` | `1024` | 이미지 최대 너비 (px) |
 | `VISION_SNAPSHOT_COUNT` | `snapshot_count` | `5` | Vision 배치당 수집 이미지 수 |
 | `VISION_INTERVAL_SECONDS` | `snapshot_interval` | `30` | Vision 수집 간격 (초) |
+| `VISION_COLLECT_INTERVAL` | `collect_interval` | `0.5` | Batch collector capture 간격 (초) |
+| `VISION_COLLECT_COUNT` | `collect_count` | `5` | Per-camera buffer sliding window 크기 |
+| `VISION_MAX_STALE` | `max_stale_threshold` | `10.0` | Buffer entry staleness 한계 (초) |
+| `VISION_COOLDOWN_SECONDS` | `cooldown_seconds` | `30.0` | Vision logging 후 전체 cooldown (초) |
+| `VISION_EARLY_TRIGGER` | `early_trigger` | `5.0` | Cooldown offset: actual idle = cooldown - early_trigger |
 
-- `cooldown_seconds=3.0`은 하드코딩 (env/YAML에서 변경 불가)
+- `cooldown_seconds`는 `VISION_COOLDOWN_SECONDS`의 값이 사용됨 (기존 3.0s 하드코딩은 vision cooldown으로 대체됨)
 - 실행 모드(`MODE`)는 `os.environ` 직접 참조 — LLMConfig 필드 아님
 
 ---

@@ -14,5 +14,5 @@ services:
       - ./config:/app/config:ro
       - ./logs:/app/logs
       - ./output:/app/output
-    command: ["python", "main.py", "--live", "--config", "config/spaces.yaml", "-v"]
+    command: ["python", "main.py", "--live", "--config", "config/spaces.yaml"]
     restart: unless-stopped

@@ -127,6 +127,8 @@ class _BatchCollector:
             cap.set(cv2.CAP_PROP_POS_MSEC, video_pos * 1000)
             ret, frame = cap.read()
             if ret:
+                pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                logger.debug("[collect:%s] video pts=%.0fms (expected=%.0fms)", self.camera_id, pts_ms, video_pos * 1000)
                 self._encode_frame(frame, time.monotonic())
             else:
                 logger.warning("[%s] read failed at step %d, pos=%.1fs", self.camera_id, step, video_pos)
@@ -150,6 +152,7 @@ class _BatchCollector:
             self._finished = True
             return
 
+        connect_wall = time.monotonic()
         logger.debug("[%s] _run started (is_stream=%s)", self.camera_id, self._is_stream)
         if not self._is_stream:
             self._run_video(cap)
@@ -185,12 +188,20 @@ class _BatchCollector:
                             continue
                         self.buffer.clear()
                         consecutive_failures = 0
+                        connect_wall = time.monotonic()
                     else:
                         time.sleep(0.5)
                     continue
 
                 consecutive_failures = 0
 
+                pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if pts_ms > 0:
+                    lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
+                    if lag_ms > 60_000:
+                        logger.warning("[collect:%s] PTS lag=%.0fms > 60s, forcing reconnect", self.camera_id, lag_ms)
+                        consecutive_failures = max_failures
+                        continue
                 now = time.monotonic()
                 if now >= next_capture:
                     self._encode_frame(frame, now)
@@ -265,6 +276,7 @@ class _VisionOnlyWorker:
             consecutive_failures = 0
             max_failures = 5
             skip_interval = 1
+            connect_wall = time.monotonic()
 
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
@@ -285,6 +297,7 @@ class _VisionOnlyWorker:
                                 time.sleep(2)
                                 continue
                             consecutive_failures = 0
+                            connect_wall = time.monotonic()
                         else:
                             time.sleep(0.5)
                     else:
@@ -295,6 +308,13 @@ class _VisionOnlyWorker:
 
                 consecutive_failures = 0
 
+                pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if pts_ms > 0:
+                    lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
+                    if lag_ms > 60_000:
+                        logger.warning("[vis-only:%s] PTS lag=%.0fms > 60s, forcing reconnect", self.camera_id, lag_ms)
+                        consecutive_failures = max_failures
+                        continue
                 if frame_id % skip_interval != 0:
                     frame_id += 1
                     continue

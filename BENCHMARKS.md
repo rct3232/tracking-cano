@@ -7,7 +7,7 @@
 | yolo26s | 112ms | ~9 fps |
 | yolo26n | 71ms | ~14 fps |
 
-## bench_rtsp.py 결과 (30초, frame_skip=15, 3대 동시)
+## bench.py 결과 (30초, frame_skip=15, 3대 동시)
 
 ### yolo26s
 | 카메라 | frames read | inferred | infer/s | avg ms/infer |
