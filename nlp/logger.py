@@ -15,19 +15,25 @@ from openai import OpenAI
 from config.config import LLMConfig
 from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
-from utils.image import annotate_image, draw_normalized_bbox
+import cv2
+from utils.image import draw_normalized_bbox
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are an object behavior observation specialist. "
-    "Describe the movement of tracked objects in one concise, objective sentence. "
+    "You track the movement of objects in a single camera feed.\n\n"
+    "Output ONLY valid JSON with these fields:\n"
+    '- "description": One concise, objective sentence describing the movement and behavior of the target object. '
     "Use natural expressions like 'moving left/right/up/down', 'rotating', "
     "'moving quickly', 'moving slowly', 'stopped' — never use pixel values or numerical measurements. "
     "If nearby objects are listed in the input, you MUST include them in your description. "
-    "Do not omit any nearby objects that are provided. "
-    "Never invent objects or relationships that are not in the input. "
-    "No emotions, no speculation. Output exactly ONE sentence."
+    "Do not omit any nearby objects that are provided.\n"
+    '- "reasoning": Same as description (single camera).\n\n'
+    "RULES:\n"
+    "- Never invent objects or relationships that are not in the input.\n"
+    "- No emotions, no speculation.\n"
+    "- Output ONLY valid JSON. No markdown, no code fences.\n"
 )
 
 DIRECTION_MAP = {
@@ -51,6 +57,8 @@ class _LogTask:
     image_b64: Optional[str] = None
     space_logger: Optional["SpaceLogger"] = None
     space_id: Optional[str] = None
+    target_coordinate: Optional[List[float]] = None
+    target_classes: Optional[List[str]] = None
 
 
 @dataclass
@@ -113,23 +121,71 @@ class NLPLogger:
         self, tracked_list: List[TrackedBBox], frame: np.ndarray, camera_id: str = "cam_01",
         interaction_results: List[InteractionResult] | None = None,
         space_logger: Optional["SpaceLogger"] = None, space_id: Optional[str] = None,
+        target_classes: Optional[List[str]] = None,
     ) -> Optional[str]:
         if not tracked_list:
             return None
+        h, w = frame.shape[:2]
+        t0 = tracked_list[0]
+        target_coordinate = [t0.x1 / w, t0.y1 / h, t0.x2 / w, t0.y2 / h]
+
         self._ensure_client()
-        if self.client is None:
-            return None
         debounce_key = f"{camera_id}_batch"
         if not self.debouncer.should_call(debounce_key):
             logger.debug("[logger] debounce suppress: %s", debounce_key)
             return None
+
+        if self.client is None:
+            return self._log_fallback(tracked_list, camera_id, interaction_results, space_logger, space_id, target_coordinate)
+
         image_b64 = None
         if self.config.vision_enabled:
-            image_b64 = annotate_image(frame, tracked_list, quality=self.config.vision_quality, max_width=self.config.vision_max_width)
+            vis = frame.copy()
+            if self.config.vision_max_width > 0 and vis.shape[1] > self.config.vision_max_width:
+                scale = self.config.vision_max_width / vis.shape[1]
+                vis = cv2.resize(vis, (int(vis.shape[1] * scale), int(vis.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+            _, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, self.config.vision_quality])
+            raw_b64 = base64.b64encode(buf).decode("utf-8")
+            if target_coordinate:
+                image_b64 = draw_normalized_bbox(raw_b64, target_coordinate, label=t0.class_name)
+            else:
+                image_b64 = raw_b64
             self._save_image(image_b64, camera_id)
-        self._queue.put(_LogTask(tracked_list, camera_id, interaction_results, image_b64, space_logger, space_id))
+        self._queue.put(_LogTask(
+            tracked_list, camera_id, interaction_results, image_b64,
+            space_logger, space_id, target_coordinate, target_classes,
+        ))
         logger.debug("[logger] enqueue: %s (qsize=%d, vision=%s)", debounce_key, self._queue.qsize(), "on" if image_b64 else "off")
         return None
+
+    def _log_fallback(self, tracked_list: List[TrackedBBox], camera_id: str,
+                       interaction_results: List[InteractionResult] | None,
+                       space_logger: Optional["SpaceLogger"], space_id: Optional[str],
+                       target_coordinate: List[float]) -> str:
+        import json as _json
+        timestamp = datetime.now(timezone.utc).isoformat()
+        desc_parts = []
+        for t in tracked_list:
+            movement = _state_to_movement(t.state, _angle_to_direction(t.speed, t.direction_angle)) if t.state is not None else "detected"
+            desc_parts.append(f"{t.class_name} {movement}")
+        description = " | ".join(desc_parts)
+        log_entry = {
+            "target_present": True,
+            "cameras": {
+                camera_id: {
+                    "description": description,
+                    "target_coordinate": target_coordinate,
+                }
+            },
+            "reasoning": description,
+        }
+        text = _json.dumps(log_entry)
+        self._save_log(text, timestamp, camera_id)
+        if space_logger and space_id:
+            space_logger.collect(space_id, camera_id, text)
+            space_logger.try_flush(space_id, space_id)
+        logger.info("[%s] target_present=true desc=%s bbox=%s", camera_id, description, target_coordinate)
+        return text
 
     def vision_log(self, images: List[str], camera_id: str, llm_system_prompt: str | None, target_classes: List[str] | None):
         self._ensure_client()
@@ -177,7 +233,7 @@ class NLPLogger:
             logger.error("Vision LLM API call failed: %s", e)
             return None
 
-        log_file = self.log_dir / f"vision_{task.camera_id}_{datetime.now().strftime('%Y%m%d')}.log"
+        log_file = self.log_dir / f"{task.camera_id}_{datetime.now().strftime('%Y%m%d')}.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
         logger.info("[vision:%s] %s", task.camera_id, text)
@@ -278,11 +334,11 @@ class NLPLogger:
                 continue
             if isinstance(cam_val, str):
                 desc = cam_val.strip()
-                self._save_log(desc, timestamp, f"vision_{clean_cam_id}")
+                self._save_log(desc, timestamp, clean_cam_id)
             elif isinstance(cam_val, dict):
                 desc = cam_val.get("description", "")
                 if desc:
-                    self._save_log(desc.strip(), timestamp, f"vision_{clean_cam_id}")
+                    self._save_log(desc.strip(), timestamp, clean_cam_id)
                 coords = cam_val.get("target_coordinate")
                 if coords and isinstance(coords, list) and len(coords) == 4:
                     bbox_coords[clean_cam_id] = [float(c) for c in coords]
@@ -304,7 +360,7 @@ class NLPLogger:
                 except Exception as e:
                     logger.error("Failed to save target capture %s: %s", filename, e)
 
-            log_file = self.log_dir / f"vision_space_{space_name}_{datetime.now().strftime('%Y%m%d')}.log"
+            log_file = self.log_dir / f"{space_name}_{datetime.now().strftime('%Y%m%d')}.log"
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {reasoning}\n")
 
@@ -390,7 +446,10 @@ class NLPLogger:
 
         target_present = parsed.get("target_present", False)
         reasoning = parsed.get("reasoning", "")
-        logger.info("[detect:%s] target_present=%s reason=%s", camera_id, target_present, reasoning)
+        if target_present:
+            logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning)
+        else:
+            logger.debug("[detect:%s] target_present=False reason=%s", camera_id, reasoning)
         return parsed
 
     def stop(self):
@@ -419,8 +478,12 @@ class NLPLogger:
         if not changes:
             return
         timestamp = datetime.now(timezone.utc).isoformat()
-        prompt = self._build_prompt(changes, timestamp, task.camera_id, task.interaction_results)
+        prompt = self._build_prompt(changes, timestamp, task.camera_id, task.interaction_results,
+                                     task.target_coordinate, task.target_classes)
         logger.debug("[logger] LLM call: camera=%s prompt=%d chars", task.camera_id, len(prompt))
+
+        import json as _json
+        text = None
         try:
             if task.image_b64:
                 content = [
@@ -429,22 +492,53 @@ class NLPLogger:
                 ]
             else:
                 content = prompt
-            response = self.client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[
+            response_kwargs = {
+                "model": self.config.model_name,
+                "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
                 ],
-                max_tokens=150,
-            )
-            text = response.choices[0].message.content.strip()
-            self._save_log(text, timestamp, task.camera_id)
-            if task.space_logger and task.space_id:
-                task.space_logger.collect(task.space_id, task.camera_id, text)
-                task.space_logger.try_flush(task.space_id, task.space_id)
+                "max_tokens": 200,
+            }
+            try:
+                kw_with_format = dict(response_kwargs)
+                kw_with_format["response_format"] = {"type": "json_object"}
+                response = self.client.chat.completions.create(**kw_with_format)
+                text = response.choices[0].message.content.strip()
+            except Exception as e:
+                if "'response_format'" in str(e):
+                    logger.warning("Model does not support json_object, falling back to text-only")
+                    response = self.client.chat.completions.create(**response_kwargs)
+                    text = response.choices[0].message.content.strip()
+                else:
+                    raise
         except Exception as e:
             logger.error("LLM API call failed: %s", e)
-        return text
+            return None
+
+        parsed = self._parse_json_response(text, task.camera_id)
+        if parsed:
+            llm_desc = parsed.get("description", "") or parsed.get("reasoning", "") or text
+        else:
+            llm_desc = text
+
+        cam_data: dict = {"description": llm_desc}
+        if task.target_coordinate:
+            cam_data["target_coordinate"] = task.target_coordinate
+        log_entry = {
+            "target_present": True,
+            "cameras": {task.camera_id: cam_data},
+            "reasoning": llm_desc,
+        }
+        log_text = _json.dumps(log_entry)
+
+        self._save_log(log_text, timestamp, task.camera_id)
+        if task.space_logger and task.space_id:
+            task.space_logger.collect(task.space_id, task.camera_id, log_text)
+            task.space_logger.try_flush(task.space_id, task.space_id)
+
+        logger.info("[%s] target_present=true desc=%s bbox=%s", task.camera_id, llm_desc, task.target_coordinate)
+        return log_text
 
     def _build_state_changes(self, tracked_list: List[TrackedBBox]) -> List[Dict]:
         changes = []
@@ -466,7 +560,10 @@ class NLPLogger:
             changes.append(change)
         return changes
 
-    def _build_prompt(self, changes: List[Dict], timestamp: str, camera_id: str, interaction_results: List[InteractionResult] | None = None) -> str:
+    def _build_prompt(self, changes: List[Dict], timestamp: str, camera_id: str,
+                       interaction_results: List[InteractionResult] | None = None,
+                       target_coordinate: Optional[List[float]] = None,
+                       target_classes: Optional[List[str]] = None) -> str:
         lines = [f"Timestamp: {timestamp}", f"Camera: {camera_id}", ""]
         lines.append("Tracked objects:")
 
@@ -490,11 +587,18 @@ class NLPLogger:
                 rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
                 lines.append(f"- {ir.class_name}: {rel}")
 
+        if target_coordinate:
+            lines.append("")
+            lines.append(f"Detected bounding box (normalized): {target_coordinate}")
+        if target_classes:
+            lines.append(f"Target classes: {', '.join(target_classes)}")
+
         lines.append("")
         if interaction_results:
-            lines.append("Describe the state changes AND the object's relationship with nearby objects in one sentence.")
+            lines.append("Describe the state changes AND the object's relationship with nearby objects.")
         else:
-            lines.append("Describe the current state changes in one sentence.")
+            lines.append("Describe the current state changes.")
+        lines.append('Output ONLY valid JSON: {"description": "one sentence", "reasoning": "same one sentence"}')
         return "\n".join(lines)
 
     def _save_log(self, text: str, timestamp: str, camera_id: str):
@@ -534,7 +638,9 @@ SPACE_SYSTEM_PROMPT = (
     "You are an object behavior observation specialist. "
     "Given observations from multiple cameras in the same space, "
     "synthesize them into one concise, objective sentence describing the overall situation. "
-    "No emotions, no speculation. Output exactly ONE sentence."
+    "No emotions, no speculation.\n\n"
+    'Output ONLY valid JSON: {"reasoning": "one sentence"}\n'
+    "No markdown, no code fences.\n"
 )
 
 DETECT_SYSTEM_PROMPT = (
@@ -710,36 +816,82 @@ class SpaceLogger:
             entries = self._buffer.pop(space_id, {})
         if not entries:
             return None
-        self._ensure_client()
-        if self.client is None:
-            return None
-        if not self.debouncer.should_call(space_id):
-            return None
         timestamp = datetime.now(timezone.utc).isoformat()
-        prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
+
+        import json as _json
+        cameras: Dict[str, dict] = {}
+        all_descs: list[str] = []
         for cam_id, texts in sorted(entries.items()):
             for t in texts:
-                prompt_lines.append(f"- {cam_id}: {t}")
-        prompt_lines.append("")
-        prompt_lines.append("Synthesize these camera observations into one sentence.")
-        prompt = "\n".join(prompt_lines)
-        try:
-            response = self.client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[
-                    {"role": "system", "content": SPACE_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=150,
-            )
-            text = response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error("Space LLM API call failed: %s", e)
-            return None
+                try:
+                    parsed = _json.loads(t)
+                    cam_entry = parsed.get("cameras", {}).get(cam_id, {})
+                    desc = cam_entry.get("description", t)
+                    coord = cam_entry.get("target_coordinate")
+                except (_json.JSONDecodeError, TypeError):
+                    desc = t
+                    coord = None
+                if cam_id not in cameras:
+                    cam_data: dict = {"description": desc}
+                    if coord:
+                        cam_data["target_coordinate"] = coord
+                    cameras[cam_id] = cam_data
+                all_descs.append(f"{cam_id}: {desc}")
+
+        self._ensure_client()
+        if self.client is not None and self.debouncer.should_call(space_id):
+            prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
+            for cam_id, cam_data in sorted(cameras.items()):
+                prompt_lines.append(f"- {cam_id}: {cam_data['description']}")
+            prompt_lines.append("")
+            prompt = "\n".join(prompt_lines)
+            try:
+                use_format = {"type": "json_object"}
+                response = self.client.chat.completions.create(
+                    model=self.config.model_name,
+                    messages=[
+                        {"role": "system", "content": SPACE_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=150,
+                    response_format=use_format,
+                )
+                text = response.choices[0].message.content.strip()
+                parsed = _json.loads(text)
+                reasoning = parsed.get("reasoning", "")
+            except Exception as e:
+                if "'response_format'" in str(e):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.config.model_name,
+                            messages=[
+                                {"role": "system", "content": SPACE_SYSTEM_PROMPT},
+                                {"role": "user", "content": prompt},
+                            ],
+                            max_tokens=150,
+                        )
+                        reasoning = response.choices[0].message.content.strip()
+                    except Exception as e2:
+                        logger.error("Space LLM fallback failed: %s", e2)
+                        reasoning = " | ".join(all_descs)
+                else:
+                    logger.error("Space LLM API call failed: %s", e)
+                    reasoning = " | ".join(all_descs)
+        else:
+            reasoning = " | ".join(all_descs)
+
+        log_entry = {
+            "target_present": True,
+            "cameras": cameras,
+            "reasoning": reasoning,
+        }
+        log_text = _json.dumps(log_entry)
+
         log_file = self.log_dir / f"{space_id}_{datetime.now().strftime('%Y%m%d')}.log"
         with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {text}\n")
-        return text
+            f.write(f"[{timestamp}] {log_text}\n")
+        logger.info("[%s] target_present=true cameras=%d reasoning=%s", space_id, len(cameras), reasoning)
+        return log_text
 
     def try_flush(self, space_id: str, space_name: str) -> Optional[str]:
         if self._flush_threshold <= 0:

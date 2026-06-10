@@ -1,89 +1,131 @@
-# PLAN.md — Vision LLM Pipeline Upgrade (✅ COMPLETED)
-
-All 8 phases of the Vision 2-Layer Architecture upgrade are completed. No active development in progress.
+# PLAN.md — Pipeline Output Unification (v2)
 
 ## SPEC
 
 ### Objective
-Replace the current periodic-flush vision pipeline with an event-driven, two-layer architecture: a timer-based batch collector (Layer 1) and a per-space state machine (Layer 2) that decides when to call the LLM for target detection and space logging.
+Unify the output format (JSON structure, log file naming, console output) and narrow behavioral gaps between `cv_pipeline` and `llm_vision` modes, while preserving each pipeline's architectural strengths (YOLO low-cost detection vs LLM vision stateless analysis).
 
 ### Scope
-- `config/config.py` — new config variables
-- `core/vision_worker.py` — `_BatchCollector` replaces `_VisionOnlyWorker`
-- `nlp/logger.py` — `SpaceLogger` / new state machine additions
-- `core/orchestrator.py` — space scheduler thread replaces `_vision_flush_loop`
-- `.env.example` — new env vars
+- `core/pipeline.py` — `process_frame()` return type change, DetectResult/LogEvent separation
+- `nlp/logger.py` — `SYSTEM_PROMPT` / `_process_task()` JSON output, log file naming, `vision_detect()` log level, `SpaceLogger.flush()` JSON output
+- `core/orchestrator.py` — `_CameraWorker` detect/log console output split
+- `config/config.py` — `cooldown_seconds` duplicate removal
 
 ### Key Components
 
-```
-Layer 1 [Batch Collector]        Layer 2 [Space Scheduler]
-  per camera, daemon thread        per space state machine
-  ┌──────────────────────┐        ┌──────────────────────────────┐
-  │ camera-A collector   │        │  Space-X                     │
-  │  · 0.5s timer        │        │  DETECTING → LOGGING+COOLING │
-  │  · buffer(maxlen=5)  │        │       ↑              ↓       │
-  │  · always running    │        │       └────── ← ─────┘       │
-  ├──────────────────────┤        │  Space-Y (완전 독립)         │
-  │ camera-B collector   │        └──────────────────────────────┘
-  │  · 동일              │
-  └──────────────────────┘
+**Unified JSON Output Structure (both modes):**
+```json
+{
+  "target_present": true,
+  "cameras": {
+    "{cam_id}": {
+      "description": "One short sentence describing target behavior.",
+      "target_coordinate": [x1, y1, x2, y2] | null
+    }
+  },
+  "reasoning": "One sentence summarizing the overall situation."
+}
 ```
 
+- `target_coordinate`: cv_pipeline → YOLO bbox normalized, llm_vision → LLM response
+- `description`: cv_pipeline → LLM ON: LLM / OFF: template, llm_vision → LLM
+- `reasoning`: SpaceLogger → LLM ON: LLM synthesis / OFF: description join
+
+**Phase separation (cv_pipeline):**
+```
+process_frame(frame, frame_id)
+  │
+  ├─ YOLO + ByteTrack (always runs)
+  │
+  ├─ return (DetectResult, LogEvent | None)
+  │     DetectResult: target_present, class_name, target_coordinate (always)
+  │     LogEvent:     state/interaction change detected → NLPLogger.log()
+  │
+  ├─ _CameraWorker detect phase (console only):
+  │     target_present=true  → logger.info()
+  │     target_present=false → logger.debug()
+  │
+  └─ _CameraWorker logging phase (file + console):
+        LogEvent exists → NLPLogger.log() → JSON file + console.info()
+```
+
+**Console output rule (both modes):**
+
+| State | `-v` absent (INFO) | `-v` present (DEBUG) |
+|-------|---------------------|----------------------|
+| target_present=true | ✅ INFO | ✅ INFO |
+| target_present=false | ❌ hidden | ✅ DEBUG |
+| Logging event | ✅ INFO | ✅ INFO |
+
+**Log file naming:**
+
+| Before | After | Mode |
+|--------|-------|------|
+| `logs/vision_{cam_id}_{date}.log` | `logs/{cam_id}_{date}.log` | llm_vision per-camera |
+| `logs/vision_space_{space}_{date}.log` | `logs/{space}_{date}.log` | llm_vision space |
+| `logs/{cam_id}_{date}.log` | unchanged | cv_pipeline per-camera |
+| `logs/{space_id}_{date}.log` | `logs/{space_id}_{date}.log` (JSON content) | cv_pipeline space |
+
 ### Success Criteria
-1. Batch collector captures at exactly `collect_interval` (0.5s) regardless of FPS
-2. Space state machine transitions correctly: DETECTING → (target_found) LOGGING+COOLING vs (all false) immediate DETECTING restart
-3. Camera health tracking prevents stale images from being sent to LLM
-4. Spaces operate independently — one space's LOGGING does not block another's DETECTING
-5. Reconnect clears stale buffer; degraded/dead cameras excluded from detection and space logging
+1. Both modes produce identical JSON structure in per-camera log files
+2. Log file naming is identical across modes
+3. Console output format and verbosity rules are identical across modes
+4. `Process_frame()` returns structured DetectResult for all frames
+5. SpaceLogger output is JSON in both modes
+6. `cooldown_seconds` duplicate in `LLMConfig` is removed
+7. Existing behavior preserved when LLM is disabled (template-based descriptions)
 
 ---
 
 ## Progress
 
-### Phase 1: Config Variables — COMPLETED
-- Added `collect_interval`, `collect_count`, `max_stale_threshold`, `cooldown_seconds`, `early_trigger` to `LLMConfig` in `config/config.py:47-51`
+### Phase 1: `Pipeline.process_frame()` return type change — COMPLETED
+- Added `DetectResult` and `LogEvent` dataclasses in `core/pipeline.py`
+- Changed `process_frame()` return from `Optional[str]` to `tuple[DetectResult, Optional[LogEvent]]`
+- Updated callers: `_CameraWorker._run()` in `core/orchestrator.py`, `main.py` standalone/video paths
+- **Files:** `core/pipeline.py`, `core/orchestrator.py`, `main.py`
 
-### Phase 2: Layer 1 — _BatchCollector — COMPLETED
-- Added `_FrameEntry` dataclass with `image_b64` + `captured_at`
-- Added `_BatchCollector` class with timer-based capture (`collect_interval`), sliding-window `buffer: deque[_FrameEntry](maxlen=collect_count)`, and `buffer.clear()` on reconnect
-- Kept legacy `_VisionOnlyWorker` for non-space standalone path
-- File: `core/vision_worker.py:25-192`
+### Phase 2: `_CameraWorker` console output split — COMPLETED
+- `target_present=true` → `logger.info()`, `target_present=false` → `logger.debug()`
+- Removed old `logger.info("[%s] %s", self.camera_id, result)` line
+- **File:** `core/orchestrator.py`
 
-### Phase 3: Layer 2 — Space Scheduler — COMPLETED
-- Added `_SpaceState` dataclass and `_VisionScheduler` class in `core/orchestrator.py`
-- Scheduler loop: 100ms polling, 1 detection step per space per iteration
-- State machine: DETECTING → (target_found) LOGGING+COOLING / (all false) immediate restart
-- Space independence: LOGGING blocks only its own DETECTING, not other spaces
-- Camera health: healthy → LLM detect / degraded → skip / dead → skip
-- Removed old `_vision_flush_loop` and `_flush_thread`
+### Phase 3: `NLPLogger._process_task()` JSON output — COMPLETED
+- `SYSTEM_PROMPT` rewritten to request JSON with `description`/`reasoning` fields
+- `_LogTask` dataclass: added `target_coordinate` and `target_classes` fields
+- `log()` method: extracts YOLO bbox → normalized `target_coordinate`, passes to task
+- `_process_task()`: uses `response_format=json_object`, fallback for unsupported models, parses JSON, fills `target_coordinate` from YOLO, saves unified JSON
+- Added `_log_fallback()`: LLM disabled path builds template JSON from YOLO state
+- `_build_prompt()`: accepts `target_coordinate`/`target_classes`, instructs JSON output
+- **File:** `nlp/logger.py`
 
-### Phase 4: SpaceLogger Integration — COMPLETED
-- Added `NLPLogger.vision_detect()` — synchronous single-image detection with `DETECT_SYSTEM_PROMPT`
-- Modified `_process_vision_batch_space()` to accept `camera_health: Dict[str, str]` for degraded/dead camera text annotations
-- Modified `SpaceLogger.flush_vision()` to accept `override_images` + `camera_health` for scheduler direct call path
-- File: `nlp/logger.py:144-200, 618-645, 656-677`
+### Phase 4: llm_vision log file naming unification — COMPLETED
+- `_process_vision_task()`: `vision_{task.camera_id}_` → `{task.camera_id}_`
+- `_process_vision_batch_space()`: `vision_{clean_cam_id}` → `{clean_cam_id}`
+- `_process_vision_batch_space()`: `vision_space_{space_name}_` → `{space_name}_`
+- **File:** `nlp/logger.py`
 
-### Phase 5: .env.example Update — COMPLETED
-- Added: `VISION_COLLECT_INTERVAL`, `VISION_COLLECT_COUNT`, `VISION_MAX_STALE`, `VISION_COOLDOWN_SECONDS`, `VISION_EARLY_TRIGGER`
+### Phase 5: `SpaceLogger.flush()` JSON output — COMPLETED
+- `SPACE_SYSTEM_PROMPT` rewritten to request JSON
+- `flush()`: parses per-camera JSON entries, merges `cameras` object directly
+- `reasoning` generation: LLM ON → LLM synthesis with `response_format=json_object` / LLM OFF → description join
+- **File:** `nlp/logger.py`
 
-### Phase 6: LLM Bbox + Drawing — COMPLETED
-- Added `target_coordinate` field to `VISION_SPACE_SYSTEM_PROMPT` (normalized 0~1 xywh)
-- Added `draw_normalized_bbox()` in `utils/image.py`
-- Parsed LLM bbox response and drew green rectangles on saved output images in `_process_vision_batch_space()`
-- Improved bbox prompt precision: "tight bounding box, 2-3 decimal places"
+### Phase 6: `vision_detect()` console output level change — COMPLETED
+- `target_present=True` → `logger.info()`, `target_present=False` → `logger.debug()`
+- **File:** `nlp/logger.py`
 
-### Phase 7: Detect Frame Synchronization — COMPLETED
-- `_process_detection_step()` now returns `detect_cam_id` + `detect_image_b64`
-- `_transition_to_logging()` overwrites trigger camera's image with the detect frame (not buffered frame)
-- Ensures the saved bbox image matches the exact frame sent to LLM
+### Phase 7: cv_pipeline image save with bbox annotation — COMPLETED
+- Replaced `annotate_image()` with raw encode + `draw_normalized_bbox()` using YOLO `target_coordinate`
+- Removed `annotate_image` import, added `cv2` import
+- Saved images from both modes use same `draw_normalized_bbox()` function
+- **File:** `nlp/logger.py`
 
-### Phase 8: Capture Timing Sync — COMPLETED
-- `_BatchCollector` accepts optional `start_event: threading.Event` — waits before capturing
-- `orchestrator.start()` creates a shared `start_signal` for video file sources (RTSP passes `None`)
-- Timing alignment: `next_capture = math.ceil(start_mono / interval) * interval` ensures all collectors capture at same time boundaries
-- `_get_camera_health()` reverted to 2-tuple `(health, image_b64)` — `captured_wall` chain removed
-- `_transition_to_logging()` images type reverted to `List[tuple[str, str]]`
+### Phase 8: `cooldown_seconds` duplicate removal — COMPLETED
+- Removed line 41: `cooldown_seconds: float = 3.0` (hardcoded, overridden by line 50)
+- Kept line 50: env-based `VISION_COOLDOWN_SECONDS` (default 30.0)
+- Added comment explaining usage by both pipelines
+- **File:** `config/config.py`
 
 ---
 
@@ -91,20 +133,20 @@ Layer 1 [Batch Collector]        Layer 2 [Space Scheduler]
 
 | Decision | Rationale |
 |----------|-----------|
-| Hybrid read/encode | Read every frame (RTSP buffer mgmt), encode only on 0.5s timer |
-| Reconnect → buffer.clear() | Prevent stale image false positives after stream recovery |
-| max_stale_threshold=10s | buffer refresh cycle 2.5s × 4 — ample margin |
-| Cooldown timer = cooldown - early_trigger | Simplifies "5s before end restart" into single timer |
-| False → immediate DETECTING restart | No reason to wait when no target detected |
-| Detection continues after true | Full scan of all cameras before deciding |
-| Degraded/dead camera exclusion | Prevents LLM confusion from stale/absent data |
-| Space-independent states | One space's logging doesn't block others |
+| `target_coordinate` source differs per mode | cv_pipeline: YOLO bbox (more precise), llm_vision: LLM response (only source available) |
+| Detect phase has no file log (both modes) | Detection is transient; only state changes deserve persistent log |
+| `SpaceLogger.flush()` JSON by merging, not regenerating | Per-camera descriptions already exist from previous LLM/template calls |
+| Keep debounce/cooldown separate | Different purposes: low-cost state monitoring vs high-cost stateless call rate limiting |
+| `cooldown_seconds` config shared but semantics differ | Both are "minimum interval between LLM calls" — same knob, different mechanisms |
+| Detect phase `target_present=false` → DEBUG level | Reduces noise in normal operation; still available for debugging with `-v` |
 
----
+## Not In Scope (preserved differences)
 
-## Testing Strategy
-1. **Unit:** State machine transitions (DETECT→LOG→COOL, false→immediate restart)
-2. **Unit:** Camera health classification (healthy/degraded/dead) with mocked timestamps
-3. **Integration:** RTSP disconnect/reconnect cycle → verify buffer.clear() and health transition
-4. **Integration:** Two spaces running independently → verify no cross-blocking
-5. **E2E:** Full pipeline with mock LLM → verify correct sequence of detect/log calls
+| Aspect | cv_pipeline | llm_vision |
+|--------|-------------|------------|
+| Detection | YOLO + ByteTrack (local, every frame) | LLM vision_detect() (remote, 100ms polling) |
+| Frame capture | Immediate processing | Timer-based buffer (0.5s, maxlen=5) |
+| Debounce/cooldown | LLMCallDebouncer | State machine DETECTING→LOGGING+COOLING |
+| Camera health | Not tracked | healthy/degraded/dead based on buffer age |
+| Space collection | Text observation accumulation | Multi-image batch analysis |
+| Logging trigger | State/interaction change | target_present → LOGGING state |

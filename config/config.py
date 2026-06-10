@@ -38,7 +38,6 @@ class LLMConfig:
     api_base_url: str = field(default_factory=lambda: os.getenv("API_BASE_URL", "https://api.openai.com/v1"))
     api_key: str = field(default_factory=lambda: os.getenv("API_KEY", ""))
     model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME", "gpt-4o-mini"))
-    cooldown_seconds: float = 3.0
     vision_enabled: bool = field(default_factory=lambda: os.getenv("VISION_ENABLED", "1") == "1")
     vision_quality: int = field(default_factory=lambda: int(os.getenv("VISION_QUALITY", "60")))
     vision_max_width: int = field(default_factory=lambda: int(os.getenv("VISION_MAX_WIDTH", "1024")))
@@ -48,6 +47,7 @@ class LLMConfig:
     collect_count: int = field(default_factory=lambda: int(os.getenv("VISION_COLLECT_COUNT", "5")))
     max_stale_threshold: float = field(default_factory=lambda: float(os.getenv("VISION_MAX_STALE", "10.0")))
     cooldown_seconds: float = field(default_factory=lambda: float(os.getenv("VISION_COOLDOWN_SECONDS", "30.0")))
+    # Used by both pipelines: cv_pipeline → LLMCallDebouncer debounce, llm_vision → state machine cooldown (cooldown - early_trigger)
     early_trigger: float = field(default_factory=lambda: float(os.getenv("VISION_EARLY_TRIGGER", "5.0")))
 
 

@@ -10,7 +10,7 @@ import cv2
 from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
-from core.pipeline import Pipeline
+from core.pipeline import DetectResult, LogEvent, Pipeline
 from core.vision_worker import _BatchCollector
 from nlp.logger import NLPLogger, SpaceLogger
 from utils.video import create_capture
@@ -257,11 +257,13 @@ class _CameraWorker:
                         continue
                 if frame_id % skip_interval == 0:
                     t0 = time.perf_counter()
-                    result = self.pipeline.process_frame(frame, frame_id)
+                    detect, log_event = self.pipeline.process_frame(frame, frame_id)
                     dt = time.perf_counter() - t0
                     logger.debug("[%s] frame=%d infer=%.0fms", self.camera_id, frame_id, dt * 1000)
-                    if result:
-                        logger.info("[%s] %s", self.camera_id, result)
+                    if detect.target_present:
+                        logger.info("[%s] target_present=true class=%s bbox=%s", self.camera_id, detect.class_name, detect.target_coordinate)
+                    else:
+                        logger.debug("[%s] target_present=false", self.camera_id)
                 else:
                     logger.debug("[%s] frame=%d skipped (interval=%d)", self.camera_id, frame_id, skip_interval)
                 frame_id += 1

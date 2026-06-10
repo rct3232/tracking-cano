@@ -103,9 +103,11 @@ def run_live(config: PipelineConfig, camera_source: str):
                         last_batch_time = time.monotonic()
                         buffer.popleft()
                 elif len(buffer) > 0:
-                    result = pipeline.process_frame(frame, frame_id)
-                    if result:
-                        logger.info("[cam_%s] %s", cam_id, result)
+                    detect, _ = pipeline.process_frame(frame, frame_id)
+                    if detect.target_present:
+                        logger.info("[cam_%s] target_present=true class=%s", cam_id, detect.class_name)
+                    else:
+                        logger.debug("[cam_%s] target_present=false", cam_id)
 
             frame_id += 1
     finally:
@@ -132,9 +134,11 @@ def run_video(config: PipelineConfig, video_path: str):
                 logger.info("Video ended")
                 break
 
-            result = pipeline.process_frame(frame, frame_id)
-            if result:
-                logger.info("[video] %s", result)
+            detect, _ = pipeline.process_frame(frame, frame_id)
+            if detect.target_present:
+                logger.info("[video] target_present=true class=%s bbox=%s", detect.class_name, detect.target_coordinate)
+            else:
+                logger.debug("[video] target_present=false")
 
             frame_id += 1
             time.sleep(1.0 / fps)
