@@ -78,6 +78,33 @@ class _VisionScheduler:
                 target_classes=target_classes,
             )
 
+    def add_space(self, space: SpaceConfig, app_config: AppConfig):
+        target_classes = list(dict.fromkeys(
+            cls for cam in app_config.cameras
+            if cam.id in space.camera_ids and cam.target_classes
+            for cls in cam.target_classes
+        ))
+        self._states[space.id] = _SpaceState(
+            id=space.id,
+            name=space.name,
+            camera_ids=list(space.camera_ids),
+            llm_system_prompt=space.llm_system_prompt or None,
+            target_classes=target_classes,
+        )
+
+    def remove_space(self, space_id: str):
+        self._states.pop(space_id, None)
+
+    def remove_camera_from_space(self, space_id: str, cam_id: str):
+        state = self._states.get(space_id)
+        if state and cam_id in state.camera_ids:
+            state.camera_ids.remove(cam_id)
+
+    def add_camera_to_space(self, space_id: str, cam_id: str):
+        state = self._states.get(space_id)
+        if state and cam_id not in state.camera_ids:
+            state.camera_ids.append(cam_id)
+
     def start(self):
         self._thread.start()
         logger.debug("[vision-scheduler] started with %d spaces", len(self._states))
@@ -335,6 +362,10 @@ class Orchestrator:
         self._vision_scheduler: Optional[_VisionScheduler] = None
         self._collectors: Dict[str, _BatchCollector] = {}
 
+    def update_config(self, new_config: AppConfig):
+        self.app_config = new_config
+        self._cam_to_space = _build_cam_to_space(new_config)
+
     @property
     def spaces(self) -> list[SpaceConfig]:
         return self.app_config.spaces
@@ -454,8 +485,11 @@ class Orchestrator:
     def remove_camera(self, camera_id: str):
         with self._lock:
             worker = self._workers.pop(camera_id, None)
+            collector = self._collectors.pop(camera_id, None)
         if worker:
             worker.stop()
+        if collector:
+            collector.stop()
         self._cam_to_space.pop(camera_id, None)
 
     def reassign_camera(self, camera_id: str, old_space_id: str, new_space_id: str):

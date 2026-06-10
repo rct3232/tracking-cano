@@ -839,6 +839,12 @@ class SpaceLogger:
     def set_camera_count(self, space_id: str, count: int):
         self._camera_counts[space_id] = count
 
+    def cleanup_space(self, space_id: str):
+        with self._lock:
+            self._buffer.pop(space_id, None)
+            self._vision_buffer.pop(space_id, None)
+            self._camera_counts.pop(space_id, None)
+
     def collect(self, space_id: str, camera_id: str, text: str):
         logger.debug("[space:%s] collect from %s", space_id, camera_id)
         with self._lock:

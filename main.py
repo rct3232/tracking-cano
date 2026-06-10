@@ -194,10 +194,16 @@ def run_multi(config_path: str, model_path: str | None = None, repo: LogReposito
 
 
 def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new_config, diff):
-    for cam_id in diff.reassigned_cameras:
-        old_space, new_space = diff.reassigned_cameras[cam_id]
+    orchestrator.update_config(new_config)
+
+    for cam_id, (old_space, new_space) in diff.reassigned_cameras.items():
         logger.info("Camera %s reassigned: %s → %s", cam_id, old_space, new_space)
         orchestrator.reassign_camera(cam_id, old_space, new_space)
+        if orchestrator._vision_scheduler:
+            if old_space:
+                orchestrator._vision_scheduler.remove_camera_from_space(old_space, cam_id)
+            if new_space:
+                orchestrator._vision_scheduler.add_camera_to_space(new_space, cam_id)
     for cam_id in diff.added_cameras:
         cam = next((c for c in new_config.cameras if c.id == cam_id), None)
         if cam:
@@ -208,11 +214,16 @@ def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new
         space = next((s for s in new_config.spaces if s.id == space_id), None)
         if space:
             logger.info("Space added: %s (cameras: %d)", space_id, len(space.camera_ids))
+            if orchestrator._vision_scheduler:
+                orchestrator._vision_scheduler.add_space(space, new_config)
             space_logger.set_camera_count(space_id, len(space.camera_ids))
     for space_id in diff.removed_spaces:
         text = space_logger.flush(space_id, space_id)
         if text:
             logger.info("[%s] (removed) %s", space_id, text)
+        space_logger.cleanup_space(space_id)
+        if orchestrator._vision_scheduler:
+            orchestrator._vision_scheduler.remove_space(space_id)
 
 
 def main():
