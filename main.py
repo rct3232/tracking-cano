@@ -3,18 +3,23 @@ load_dotenv()
 
 import argparse
 import logging
+import logging.handlers
 import os
 import signal
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 import cv2
 
-from config.config import PipelineConfig
+from config.config import PipelineConfig, LogConfig
 from core.config_manager import ConfigWatcher
 from core.pipeline import Pipeline
 from core.orchestrator import Orchestrator
 from nlp.logger import SpaceLogger
+from storage.database import init_db
+from storage.repository import LogRepository
 from utils.video import create_capture
 
 logging.basicConfig(
@@ -22,6 +27,20 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def setup_logging(log_dir: str):
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    console_log = log_path / f"console_{datetime.now().strftime('%Y%m%d')}.log"
+    handler = logging.handlers.RotatingFileHandler(
+        console_log, maxBytes=10 * 1024 * 1024, backupCount=7,
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    logging.getLogger().addHandler(handler)
+    logger.info("Console log: %s", console_log)
 
 _running = True
 
@@ -36,7 +55,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
-def run_live(config: PipelineConfig, camera_source: str):
+def run_live(config: PipelineConfig, camera_source: str, repo: LogRepository | None = None):
     cap = create_capture(camera_source)
     if cap is None:
         logger.error("Cannot open camera %s", camera_source)
@@ -45,7 +64,7 @@ def run_live(config: PipelineConfig, camera_source: str):
     cam_id = camera_source.split("/")[-1] if "/" in camera_source else camera_source
     mode = os.environ.get("MODE", "cv_pipeline")
     logger.info("Live mode started: %s (mode=%s)", camera_source, mode)
-    pipeline = Pipeline(config, f"cam_{cam_id}")
+    pipeline = Pipeline(config, f"cam_{cam_id}", repo=repo)
     frame_id = 0
     consecutive_failures = 0
     max_failures = 5
@@ -116,7 +135,7 @@ def run_live(config: PipelineConfig, camera_source: str):
         logger.info("Camera %s released", camera_source)
 
 
-def run_video(config: PipelineConfig, video_path: str):
+def run_video(config: PipelineConfig, video_path: str, repo: LogRepository | None = None):
     cap = create_capture(video_path)
     if cap is None:
         logger.error("Cannot open video %s", video_path)
@@ -124,7 +143,7 @@ def run_video(config: PipelineConfig, video_path: str):
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     logger.info("Video mode: %s (fps=%.1f)", video_path, fps)
-    pipeline = Pipeline(config, "video")
+    pipeline = Pipeline(config, "video", repo=repo)
     frame_id = 0
 
     try:
@@ -147,12 +166,12 @@ def run_video(config: PipelineConfig, video_path: str):
         cap.release()
 
 
-def run_multi(config_path: str, model_path: str | None = None):
+def run_multi(config_path: str, model_path: str | None = None, repo: LogRepository | None = None):
     from core.config_manager import load_config
     app_config = load_config(config_path)
     max_cameras = max((len(s.camera_ids) for s in app_config.spaces), default=1)
-    space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras)
-    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path)
+    space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras, repo=repo)
+    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path, repo=repo)
     orchestrator.start()
     watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
     watcher.start()
@@ -213,8 +232,18 @@ def main():
     if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
         logging.getLogger().setLevel(logging.DEBUG)
 
+    log_config = LogConfig()
+    setup_logging(log_config.log_dir)
+
     mode = os.environ.get("MODE", "cv_pipeline")
     logger.info("Running in mode: %s", mode)
+
+    engine, Session = init_db(log_config.db_url)
+    repo = LogRepository(Session) if Session else None
+    if repo:
+        logger.info("Log DB: %s", log_config.db_url)
+    else:
+        logger.warning("No DB available — log entries will not be persisted")
 
     config = PipelineConfig(
         target_classes=args.target_classes,
@@ -224,11 +253,11 @@ def main():
     config.yolo.conf_threshold = args.conf
 
     if args.live == "":
-        run_multi(args.config, model_path=args.model)
+        run_multi(args.config, model_path=args.model, repo=repo)
     elif args.live:
-        run_live(config, args.live)
+        run_live(config, args.live, repo=repo)
     else:
-        run_video(config, args.video)
+        run_video(config, args.video, repo=repo)
 
 
 if __name__ == "__main__":

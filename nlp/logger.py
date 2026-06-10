@@ -15,6 +15,7 @@ from openai import OpenAI
 from config.config import LLMConfig
 from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
+from storage.database import LogEntry
 import cv2
 from utils.image import draw_normalized_bbox
 
@@ -84,11 +85,12 @@ class LLMCallDebouncer:
 
 
 class NLPLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs", output_dir: str = "output"):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", output_dir: str = "output", repo=None):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir = Path(output_dir)
+        self._repo = repo
         self.debouncer = LLMCallDebouncer(config.cooldown_seconds)
         self.client: Optional[OpenAI] = None
         self._queue = queue.Queue()
@@ -105,6 +107,31 @@ class NLPLogger:
                 base_url=self.config.api_base_url,
                 api_key=self.config.api_key,
             )
+
+    def _db_insert(self, log_type: str, timestamp: str | None = None, camera_id: str | None = None,
+                   space_id: str | None = None, target_present: bool | None = None,
+                   description: str | None = None, target_coordinate: list | None = None,
+                   reasoning: str | None = None, raw_json: str | None = None):
+        if self._repo is None:
+            return
+        import json as _json
+        try:
+            ts = datetime.fromisoformat(timestamp) if timestamp else datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            ts = datetime.now(timezone.utc)
+        entry = LogEntry(
+            timestamp=ts,
+            log_type=log_type,
+            camera_id=camera_id,
+            space_id=space_id,
+            target_present=target_present,
+            description=description,
+            target_coordinate=_json.dumps(target_coordinate) if target_coordinate is not None else None,
+            reasoning=reasoning,
+            raw_json=raw_json,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._repo.save(entry)
 
     def _save_image(self, image_b64: str, camera_id: str):
         try:
@@ -233,9 +260,13 @@ class NLPLogger:
             logger.error("Vision LLM API call failed: %s", e)
             return None
 
-        log_file = self.log_dir / f"{task.camera_id}_{datetime.now().strftime('%Y%m%d')}.log"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {text}\n")
+        self._db_insert(
+            log_type="vision",
+            timestamp=timestamp,
+            camera_id=task.camera_id,
+            description=text,
+            raw_json=text,
+        )
         logger.info("[vision:%s] %s", task.camera_id, text)
         return text
 
@@ -360,9 +391,14 @@ class NLPLogger:
                 except Exception as e:
                     logger.error("Failed to save target capture %s: %s", filename, e)
 
-            log_file = self.log_dir / f"{space_name}_{datetime.now().strftime('%Y%m%d')}.log"
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {reasoning}\n")
+            self._db_insert(
+                log_type="vision_space",
+                timestamp=timestamp,
+                space_id=space_name,
+                target_present=target_present,
+                reasoning=reasoning,
+                raw_json=text,
+            )
 
         logger.info("[vision:%s] target_present=%s cameras=%d %s", space_name, target_present, len(cameras), reasoning)
         return text
@@ -601,10 +637,35 @@ class NLPLogger:
         lines.append('Output ONLY valid JSON: {"description": "one sentence", "reasoning": "same one sentence"}')
         return "\n".join(lines)
 
-    def _save_log(self, text: str, timestamp: str, camera_id: str):
-        log_file = self.log_dir / f"{camera_id}_{datetime.now().strftime('%Y%m%d')}.log"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {text}\n")
+    def _save_log(self, text: str, timestamp: str, camera_id: str, log_type: str = "detect"):
+        import json as _json
+        target_present = None
+        description = None
+        target_coordinate = None
+        reasoning = None
+        try:
+            parsed = _json.loads(text)
+            if isinstance(parsed, dict):
+                target_present = parsed.get("target_present")
+                reasoning = parsed.get("reasoning")
+                cameras = parsed.get("cameras", {})
+                if isinstance(cameras, dict):
+                    first_cam = next(iter(cameras.values()), {})
+                    if isinstance(first_cam, dict):
+                        description = first_cam.get("description")
+                        target_coordinate = first_cam.get("target_coordinate")
+        except (_json.JSONDecodeError, TypeError):
+            description = text
+        self._db_insert(
+            log_type=log_type,
+            timestamp=timestamp,
+            camera_id=camera_id,
+            target_present=target_present,
+            description=description,
+            target_coordinate=target_coordinate,
+            reasoning=reasoning,
+            raw_json=text,
+        )
 
 
 def _angle_to_direction(speed: float, angle: float) -> str:
@@ -730,10 +791,11 @@ VISION_SPACE_SYSTEM_PROMPT = (
 
 
 class SpaceLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs", flush_threshold: int = 0):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", flush_threshold: int = 0, repo=None):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._repo = repo
         self.debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
         self.client: Optional[OpenAI] = None
         self._buffer: Dict[str, Dict[str, List[str]]] = {}
@@ -748,6 +810,31 @@ class SpaceLogger:
                 base_url=self.config.api_base_url,
                 api_key=self.config.api_key,
             )
+
+    def _db_insert(self, log_type: str, timestamp: str | None = None, camera_id: str | None = None,
+                   space_id: str | None = None, target_present: bool | None = None,
+                   description: str | None = None, target_coordinate: list | None = None,
+                   reasoning: str | None = None, raw_json: str | None = None):
+        if self._repo is None:
+            return
+        import json as _json
+        try:
+            ts = datetime.fromisoformat(timestamp) if timestamp else datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            ts = datetime.now(timezone.utc)
+        entry = LogEntry(
+            timestamp=ts,
+            log_type=log_type,
+            camera_id=camera_id,
+            space_id=space_id,
+            target_present=target_present,
+            description=description,
+            target_coordinate=_json.dumps(target_coordinate) if target_coordinate is not None else None,
+            reasoning=reasoning,
+            raw_json=raw_json,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._repo.save(entry)
 
     def set_camera_count(self, space_id: str, count: int):
         self._camera_counts[space_id] = count
@@ -887,9 +974,14 @@ class SpaceLogger:
         }
         log_text = _json.dumps(log_entry)
 
-        log_file = self.log_dir / f"{space_id}_{datetime.now().strftime('%Y%m%d')}.log"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {log_text}\n")
+        self._db_insert(
+            log_type="space",
+            timestamp=timestamp,
+            space_id=space_id,
+            target_present=log_entry.get("target_present"),
+            reasoning=reasoning,
+            raw_json=log_text,
+        )
         logger.info("[%s] target_present=true cameras=%d reasoning=%s", space_id, len(cameras), reasoning)
         return log_text
 

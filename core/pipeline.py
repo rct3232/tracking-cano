@@ -31,13 +31,13 @@ class LogEvent:
 
 
 class Pipeline:
-    def __init__(self, config: PipelineConfig, camera_id: str = "cam_01", space_logger: Optional[SpaceLogger] = None, space_id: Optional[str] = None):
+    def __init__(self, config: PipelineConfig, camera_id: str = "cam_01", space_logger: Optional[SpaceLogger] = None, space_id: Optional[str] = None, repo=None):
         self.config = config
         self.camera_id = camera_id
         self.space_logger = space_logger
         self.space_id = space_id
         self.tracker = Tracker(config.yolo)
-        self.nlp_logger = NLPLogger(config.llm)
+        self.nlp_logger = NLPLogger(config.llm, repo=repo)
         self.interaction_detector = InteractionDetector(
             overlap_threshold=config.thresholds.overlap,
             distance_threshold=config.thresholds.distance,

@@ -25,6 +25,10 @@ Thumbs.db
 
 # Logs
 logs/*.log
+logs/*.db
+
+# Test artifacts
+test_output/
 
 # YOLO models (downloaded)
 *.pt

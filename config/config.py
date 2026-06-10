@@ -52,6 +52,12 @@ class LLMConfig:
 
 
 @dataclass
+class LogConfig:
+    db_url: str = field(default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///logs/tracking.db"))
+    log_dir: str = field(default_factory=lambda: os.getenv("LOG_DIR", "logs"))
+
+
+@dataclass
 class PipelineConfig:
     target_classes: List[str] = field(default_factory=lambda: ["cat"])
     interaction_classes: Optional[List[str]] = None

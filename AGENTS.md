@@ -17,6 +17,9 @@ Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detect
 5. **환경변수 추가 시 양쪽 필수** — config.py + .env.example, 한쪽만 하면 버그
 6. **벤치마크 기록 의무** — bench.py 실행 후 BENCHMARKS.md 갱신 필수
 7. **Docker 실행 의무** — 로컬에서 `python main.py` 직접 실행 금지, 반드시 Docker로 실행.
+8. **DATABASE_URL 우선순위** — `DATABASE_URL` env var가 설정되면 해당 DB 사용. 미설정 시 기본값 `sqlite:///logs/tracking.db`. PostgreSQL은 `postgresql://user:pass@host:5432/dbname` 형식.
+9. **DB 비종속 설계** — `repo`가 None이면 console-only로 fallback (DB 없이도 standalone 동작). `init_db()` 실패 시 앱은 console-only로 계속 실행.
+10. **PostgreSQL 전용 기능 금지** — SQLite에서도 동일하게 동작해야 함. JSONB 대신 Text, array 대신 JSON string으로 저장.
 
 ## 핵심 파일
 | 파일 | 역할 |
@@ -32,6 +35,8 @@ Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detect
 | `config/config_manager.py` | YAML 로딩, `diff_configs()`, watchdog hot-reload |
 | `utils/video.py` | `create_capture()`, `resolve_source()` |
 | `utils/image.py` | `draw_normalized_bbox()` — LLM 응답 bbox 시각화 |
+| `storage/database.py` | SQLAlchemy engine, session, LogEntry 모델, `init_db()` |
+| `storage/repository.py` | `LogRepository.save()` — DB insert 추상화 |
 
 ## Docker 실행 절차
 
@@ -44,8 +49,11 @@ Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detect
 4. 유저가 승인하면 `docker compose up --build`(CPU) 또는 `-f docker-compose.gpu.yml`(GPU)를 실행한다.
    - GPU 여부는 유저에게 추가로 물어본다.
 
-## Gotchas (2026-05 기준)
+## Gotchas (2026-06 기준)
 - `--multi` 플래그 없음. `--live` 단독 인자 = multi mode
 - 타입 힌트 혼용 중: `Optional[str]`(old) vs `str \| None`(new). 기존 파일 스타일 유지
 - `LLMConfig.cooldown_seconds` 중복 선언: 하드코딩된 3.0s가 `VISION_COOLDOWN_SECONDS`(기본 30.0)로 override됨 — vision logging 후 일반 텍스트 LLM도 30s 쿨다운 적용됨 (버그 가능성 있음)
 - `VISION_MAX_STALE`(`max_stale_threshold`)는 config에 선언되어 있으나 현재 `_BatchCollector`에서 사용되지 않음 — age-based eviction 미구현
+- 로그는 파일 대신 DB(`log_entries` 테이블)에 저장됨. Console 출력은 `logs/console_YYYYMMDD.log`에 파일 저장.
+- `DATABASE_URL` 미설정 시 기본 `sqlite:///logs/tracking.db` 사용. 운영 환경에서는 PostgreSQL URL을 설정.
+- DB 연결 실패해도 앱은 console-only로 계속 실행 (`repo=None` → 모든 `_db_insert`가 무시됨).

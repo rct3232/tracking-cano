@@ -4,3 +4,5 @@ pyyaml
 python-dotenv
 watchdog
 openai
+sqlalchemy>=2.0
+psycopg2-binary

@@ -320,10 +320,11 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
 
 
 class Orchestrator:
-    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None, default_model_path: Optional[str] = None):
+    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None, default_model_path: Optional[str] = None, repo=None):
         self.app_config = app_config
         self.space_logger = space_logger
         self._default_model_path = default_model_path
+        self._repo = repo
         self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
         self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
@@ -341,7 +342,7 @@ class Orchestrator:
     def _ensure_vision_nlp(self, llm_config):
         if self._vision_nlp_logger is None:
             from nlp.logger import NLPLogger as NLPLoggerCls
-            self._vision_nlp_logger = NLPLoggerCls(llm_config)
+            self._vision_nlp_logger = NLPLoggerCls(llm_config, repo=self._repo)
 
     @property
     def all_finished(self) -> bool:
@@ -387,7 +388,7 @@ class Orchestrator:
             logger.error("Cannot open camera %s from %s", camera.id, camera.source)
             return
         config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
-        pipeline = Pipeline(config, camera.id, self.space_logger, space_id)
+        pipeline = Pipeline(config, camera.id, self.space_logger, space_id, repo=self._repo)
         stop_event = threading.Event()
         from os import environ
         mode = environ.get("MODE", "cv_pipeline")
