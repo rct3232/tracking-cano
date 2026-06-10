@@ -65,6 +65,24 @@ Layer 1 [Batch Collector]        Layer 2 [Space Scheduler]
 ### Phase 5: .env.example Update — COMPLETED
 - Added: `VISION_COLLECT_INTERVAL`, `VISION_COLLECT_COUNT`, `VISION_MAX_STALE`, `VISION_COOLDOWN_SECONDS`, `VISION_EARLY_TRIGGER`
 
+### Phase 6: LLM Bbox + Drawing — COMPLETED
+- Added `target_coordinate` field to `VISION_SPACE_SYSTEM_PROMPT` (normalized 0~1 xywh)
+- Added `draw_normalized_bbox()` in `utils/image.py`
+- Parsed LLM bbox response and drew green rectangles on saved output images in `_process_vision_batch_space()`
+- Improved bbox prompt precision: "tight bounding box, 2-3 decimal places"
+
+### Phase 7: Detect Frame Synchronization — COMPLETED
+- `_process_detection_step()` now returns `detect_cam_id` + `detect_image_b64`
+- `_transition_to_logging()` overwrites trigger camera's image with the detect frame (not buffered frame)
+- Ensures the saved bbox image matches the exact frame sent to LLM
+
+### Phase 8: Capture Timing Sync — COMPLETED
+- `_BatchCollector` accepts optional `start_event: threading.Event` — waits before capturing
+- `orchestrator.start()` creates a shared `start_signal` for video file sources (RTSP passes `None`)
+- Timing alignment: `next_capture = math.ceil(start_mono / interval) * interval` ensures all collectors capture at same time boundaries
+- `_get_camera_health()` reverted to 2-tuple `(health, image_b64)` — `captured_wall` chain removed
+- `_transition_to_logging()` images type reverted to `List[tuple[str, str]]`
+
 ---
 
 ## Key Design Decisions

@@ -50,6 +50,7 @@ class _VisionScheduler:
         config: LLMConfig,
         cam_to_space: Dict[str, str],
         app_config: AppConfig,
+        all_finished_check=None,
     ):
         self._stop_event = threading.Event()
         self._states: Dict[str, _SpaceState] = {}
@@ -58,6 +59,7 @@ class _VisionScheduler:
         self._space_logger = space_logger
         self._config = config
         self._cam_to_space = cam_to_space
+        self._is_all_finished = all_finished_check or (lambda: False)
         self._thread = threading.Thread(target=self._run, daemon=True, name="vision-scheduler")
 
         for space in spaces:
@@ -84,6 +86,9 @@ class _VisionScheduler:
 
     def _run(self):
         while not self._stop_event.is_set():
+            if self._is_all_finished():
+                self._stop_event.wait(1.0)
+                continue
             now = time.monotonic()
             for state in self._states.values():
                 if state.state == "cooling":
@@ -129,7 +134,7 @@ class _VisionScheduler:
 
             if result.get("target_present", False):
                 logger.info("[space:%s] cam=%s target_present=True → immediate logging", state.id, cam_id)
-                self._transition_to_logging(state, now)
+                self._transition_to_logging(state, now, detect_cam_id=cam_id, detect_image_b64=image_b64)
                 return
 
             state.detect_idx += 1
@@ -138,7 +143,9 @@ class _VisionScheduler:
         logger.debug("[space:%s] all cameras done, no target → immediate restart", state.id)
         state.detect_idx = 0
 
-    def _transition_to_logging(self, state: _SpaceState, now: float):
+    def _transition_to_logging(self, state: _SpaceState, now: float,
+                               detect_cam_id: str | None = None,
+                               detect_image_b64: str | None = None):
         logger.info("[space:%s] target found → logging + cooling", state.id)
         state.state = "logging"
 
@@ -150,6 +157,8 @@ class _VisionScheduler:
         for cam_id in state.camera_ids:
             health, image_b64 = self._get_camera_health(cam_id, now)
             camera_health[cam_id] = health
+            if cam_id == detect_cam_id and detect_image_b64 is not None:
+                image_b64 = detect_image_b64
             if health == "healthy" and image_b64 is not None:
                 images.append((cam_id, image_b64))
 
@@ -326,11 +335,18 @@ class Orchestrator:
             return len(self._workers) == 0 and len(self._collectors) == 0
 
     def start(self):
+        video_cam_ids = [
+            cam.id for cam in self.app_config.cameras
+            if cam.status == "active" and not _is_stream_source(cam.source)
+        ]
+        video_count = len(video_cam_ids)
+        barrier = threading.Barrier(video_count) if video_count > 0 else None
+
         for cam in self.app_config.cameras:
             if cam.status != "active":
                 logger.info("Skipping inactive camera: %s", cam.id)
                 continue
-            self.add_camera(cam)
+            self.add_camera(cam, barrier=barrier, loop_count=1)
 
         from os import environ
         mode = environ.get("MODE", "cv_pipeline")
@@ -344,10 +360,13 @@ class Orchestrator:
                 config=self._vision_nlp_logger.config,
                 cam_to_space=self._cam_to_space,
                 app_config=self.app_config,
+                all_finished_check=lambda: self.all_finished,
             )
             self._vision_scheduler.start()
 
-    def add_camera(self, camera: CameraConfig):
+    def add_camera(self, camera: CameraConfig, start_event: threading.Event | None = None,
+                   capture_start: float | None = None,
+                   barrier: threading.Barrier | None = None, loop_count: int = 1):
         space_id = self._cam_to_space.get(camera.id)
         cap = create_capture(camera.source)
         if cap is None:
@@ -377,6 +396,10 @@ class Orchestrator:
                     vision_quality=config.llm.vision_quality,
                     vision_max_width=config.llm.vision_max_width,
                     on_finished=_on_collector_finished,
+                    start_event=start_event,
+                    capture_start=capture_start,
+                    loop_count=loop_count,
+                    barrier=barrier,
                 )
                 with self._lock:
                     self._collectors[camera.id] = collector

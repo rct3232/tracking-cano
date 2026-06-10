@@ -156,14 +156,15 @@ def run_multi(config_path: str, model_path: str | None = None):
     flush_interval = 10.0
     last_flush = 0.0
     try:
-        while _running and not orchestrator.all_finished:
+        while _running:
+            if orchestrator.all_finished:
+                time.sleep(1)
+                continue
             now = time.time()
             if now - last_flush >= flush_interval:
                 orchestrator.flush_spaces()
                 last_flush = now
             time.sleep(1)
-        if orchestrator.all_finished:
-            logger.info("All cameras finished processing")
     finally:
         orchestrator.flush_spaces()
         watcher.stop()

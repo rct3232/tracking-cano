@@ -51,3 +51,29 @@ def annotate_image(
 
     _, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def draw_normalized_bbox(
+    image_b64: str,
+    coords: list[float],
+    color: tuple[int, int, int] = (0, 255, 0),
+    label: str = "",
+    quality: int = 60,
+) -> str:
+    img_bytes = base64.b64decode(image_b64)
+    img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return image_b64
+    h, w = img.shape[:2]
+    x1 = int(max(0.0, min(1.0, coords[0])) * w)
+    y1 = int(max(0.0, min(1.0, coords[1])) * h)
+    x2 = int(max(0.0, min(1.0, coords[2])) * w)
+    y2 = int(max(0.0, min(1.0, coords[3])) * h)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+    if label:
+        font_scale = 0.5
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+        cv2.rectangle(img, (x1, y1 - th - 4), (x1 + tw, y1), color, -1)
+        cv2.putText(img, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 1)
+    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return base64.b64encode(buf.tobytes()).decode("ascii")

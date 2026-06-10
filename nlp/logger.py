@@ -15,7 +15,7 @@ from openai import OpenAI
 from config.config import LLMConfig
 from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
-from utils.image import annotate_image
+from utils.image import annotate_image, draw_normalized_bbox
 
 logger = logging.getLogger(__name__)
 
@@ -270,15 +270,24 @@ class NLPLogger:
 
         logger.debug("[vision:%s] parsed: target=%r cameras_keys=%r", space_name, target_present, list(cameras.keys()))
 
+        bbox_coords: dict[str, list[float]] = {}
         for cam_id, cam_val in cameras.items():
             clean_cam_id = cam_id.strip("[]")
             if valid_camera_ids and clean_cam_id not in valid_camera_ids:
                 logger.warning("[vision:%s] unknown camera_id %r (not in %r), skipping", space_name, cam_id, valid_camera_ids)
                 continue
             if isinstance(cam_val, str):
-                self._save_log(cam_val.strip(), timestamp, f"vision_{clean_cam_id}")
+                desc = cam_val.strip()
+                self._save_log(desc, timestamp, f"vision_{clean_cam_id}")
+            elif isinstance(cam_val, dict):
+                desc = cam_val.get("description", "")
+                if desc:
+                    self._save_log(desc.strip(), timestamp, f"vision_{clean_cam_id}")
+                coords = cam_val.get("target_coordinate")
+                if coords and isinstance(coords, list) and len(coords) == 4:
+                    bbox_coords[clean_cam_id] = [float(c) for c in coords]
             else:
-                logger.warning("[vision:%s] camera %s value is not a string (%r), skipping", space_name, cam_id, cam_val)
+                logger.warning("[vision:%s] camera %s value has unexpected type (%s), skipping", space_name, cam_id, type(cam_val).__name__)
                 continue
 
         if target_present:
@@ -288,7 +297,10 @@ class NLPLogger:
             for cam_id, img_b64 in last_per_cam.items():
                 filename = f"{space_name}_{cam_id}_{capture_ts}.jpg"
                 try:
-                    (self.output_dir / filename).write_bytes(base64.b64decode(img_b64))
+                    img_to_save = img_b64
+                    if cam_id in bbox_coords:
+                        img_to_save = draw_normalized_bbox(img_b64, bbox_coords[cam_id], label=space_name)
+                    (self.output_dir / filename).write_bytes(base64.b64decode(img_to_save))
                 except Exception as e:
                     logger.error("Failed to save target capture %s: %s", filename, e)
 
@@ -546,8 +558,14 @@ VISION_SPACE_SYSTEM_PROMPT = (
     "1) CAMERA IDs: In your JSON output, use ONLY the bare camera IDs — 'livingroom', NOT '[livingroom]', "
     "NOT 'livingroom_2'. Never invent camera IDs that don't appear in the input.\n"
     "2) TARGET-ONLY DESCRIPTIONS: Describe what the target is DOING — its action, pose, location, and any object it interacts with. "
-    "If a target is not visible from a camera, write EXACTLY: 'No target detected.'\n"
+    "If a target is not visible from a camera, write 'No target detected.' as the description.\n"
     "3) ONE SENTENCE PER CAMERA: Each description must be one short sentence (under 20 words).\n"
+     "4) BOUNDING BOX (REQUIRED when target visible): When the target IS visible from a camera, "
+     "include its tight bounding box as normalized coordinates [x1, y1, x2, y2] "
+     "where (0,0) is top-left and (1,1) is bottom-right. "
+     "The box MUST tightly enclose the visible body — no padding around it. "
+     "Aim for 2-3 decimal places (e.g. [0.25, 0.35, 0.55, 0.65]). "
+     "If target is not visible from a camera, set target_coordinate to null.\n"
 
     "\n\nDETECTION RULES:\n"
     "- Set target_present to true if you see the target (even partially) — look for body parts peeking from furniture/beds, "
@@ -565,12 +583,24 @@ VISION_SPACE_SYSTEM_PROMPT = (
     '- "reasoning": string (REQUIRED — you MUST include this field. '
     'One short sentence summarizing your conclusion.)\n\n'
 
+    "CAMERAS FORMAT:\n"
+    "Each camera value MUST be an object (NOT a string) with these fields:\n"
+    '- "description": string (REQUIRED — one short sentence)\n'
+    '- "target_coordinate": [x1, y1, x2, y2] or null (REQUIRED — '
+    'normalized 0.0-1.0 bounding box when target visible, null otherwise)\n\n'
+
     "Example when target IS present:\n"
     '{\n'
     '  "target_present": true,\n'
     '  "cameras": {\n'
-    '    "hallway": "No target detected.",\n'
-    '    "livingfront": "Cat sitting on the sofa, facing the camera, grooming its paw."\n'
+    '    "hallway": {\n'
+    '      "description": "No target detected.",\n'
+    '      "target_coordinate": null\n'
+    '    },\n'
+    '    "livingfront": {\n'
+    '      "description": "Cat sitting on the sofa, facing the camera, grooming its paw.",\n'
+    '      "target_coordinate": [0.25, 0.35, 0.55, 0.65]\n'
+    '    }\n'
     '  },\n'
     '  "reasoning": "Cat sitting on the sofa, grooming its left front paw with its tongue."\n'
     "}\n"
@@ -579,8 +609,14 @@ VISION_SPACE_SYSTEM_PROMPT = (
     '{\n'
     '  "target_present": false,\n'
     '  "cameras": {\n'
-    '    "hallway": "No target detected.",\n'
-    '    "livingfront": "No target detected."\n'
+    '    "hallway": {\n'
+    '      "description": "No target detected.",\n'
+    '      "target_coordinate": null\n'
+    '    },\n'
+    '    "livingfront": {\n'
+    '      "description": "No target detected.",\n'
+    '      "target_coordinate": null\n'
+    '    }\n'
     '  },\n'
     '  "reasoning": "No living cat visible from any camera; only inanimate objects present."\n'
     "}\n"
@@ -631,12 +667,14 @@ class SpaceLogger:
                         llm_system_prompt: str | None = None, target_classes: List[str] | None = None,
                         valid_camera_ids: List[str] | None = None,
                         camera_health: Dict[str, str] | None = None,
-                        override_images: List[tuple[str, str]] | None = None):
+                        override_images: List[tuple[str, str, float]] | None = None):
         """Submit all camera images for space-level LLM analysis.
 
         Two call paths:
         - Periodic timer (legacy): reads from self._vision_buffer
         - Scheduler (new): caller provides override_images + camera_health directly
+
+        Each image tuple: (camera_id, image_b64, captured_wall_clock)
         """
         logger.debug("[flush_vision] called space_id=%s", space_id)
         if override_images is not None:
@@ -649,10 +687,11 @@ class SpaceLogger:
                 if not entries:
                     return None
                 all_images = []
+                now = time.time()
                 for cam_id in sorted(entries.keys()):
                     entry = entries[cam_id]
                     for img in entry["images"]:
-                        all_images.append((cam_id, img))
+                        all_images.append((cam_id, img, now))
                     entry["submitted"] = True
 
         if not nlp_logger.debouncer.should_call(f"{space_id}_vision"):

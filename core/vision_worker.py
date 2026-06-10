@@ -1,5 +1,6 @@
 import base64
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -33,6 +34,10 @@ class _BatchCollector:
 
     Space-aware mode: buffer is read externally by _VisionScheduler.
     Standalone mode: pass on_capture callback for per-capture notification.
+
+    For video file sources, uses seek-based capture aligned to a shared
+    wall-clock (capture_start) so all collectors capture the same
+    video timestamp across cameras.
     """
     def __init__(
         self,
@@ -45,6 +50,10 @@ class _BatchCollector:
         vision_max_width: int = 1024,
         on_capture: Callable | None = None,
         on_finished: Callable[[str], None] | None = None,
+        start_event: threading.Event | None = None,
+        capture_start: float | None = None,
+        loop_count: int = 1,
+        barrier: threading.Barrier | None = None,
     ):
         self.camera_id = camera_id
         self.source = source
@@ -55,6 +64,10 @@ class _BatchCollector:
         self.vision_max_width = vision_max_width
         self.on_capture = on_capture
         self.on_finished = on_finished
+        self._start_event = start_event
+        self._capture_start = capture_start or time.monotonic()
+        self.loop_count = loop_count
+        self._barrier = barrier
         self._is_stream = _is_stream_source(source)
         self._finished = False
         self.buffer: deque[_FrameEntry] = deque(maxlen=collect_count)
@@ -66,66 +79,124 @@ class _BatchCollector:
     def stop(self):
         self.stop_event.set()
         self.thread.join(timeout=5)
-        if not self._finished:
-            self.cap.release()
-            self._finished = True
+        self._finished = True
         logger.info("Batch collector %s stopped", self.camera_id)
 
+    def _encode_frame(self, frame, captured_at: float):
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.vision_quality])
+        image_b64 = base64.b64encode(buf).decode("utf-8")
+        entry = _FrameEntry(image_b64, captured_at)
+        self.buffer.append(entry)
+        logger.debug("[collect:%s] captured frame, buffer=%d", self.camera_id, len(self.buffer))
+        if self.on_capture:
+            self.on_capture(self.camera_id, image_b64)
+
+    _run_video_id = 0
+
+    def _run_video(self, cap):
+        _BatchCollector._run_video_id += 1
+        run_id = _BatchCollector._run_video_id
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 30
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps
+        steps_per_loop = int(duration / self.collect_interval) if duration > 0 else 0
+        total_steps = steps_per_loop * self.loop_count
+        logger.debug(
+            "[%s] video #%d: fps=%.1f frames=%d duration=%.1fs interval=%.1f steps_per_loop=%d total_steps=%d loop_count=%d",
+            self.camera_id, run_id, fps, total_frames, duration,
+            self.collect_interval, steps_per_loop, total_steps, self.loop_count,
+        )
+
+        if self._barrier is not None:
+            logger.debug("[%s] waiting on barrier (run #%d)", self.camera_id, run_id)
+            self._barrier.wait()
+
+        first_step_time = math.ceil(time.monotonic() / self.collect_interval) * self.collect_interval
+        step = 0
+        log_interval = max(1, total_steps // 5) if total_steps > 0 else 1
+
+        while not self.stop_event.is_set() and step < total_steps:
+            target_wall = first_step_time + step * self.collect_interval
+            nap = target_wall - time.monotonic()
+            if nap > 0:
+                time.sleep(nap)
+
+            video_pos = (step * self.collect_interval) % duration
+            cap.set(cv2.CAP_PROP_POS_MSEC, video_pos * 1000)
+            ret, frame = cap.read()
+            if ret:
+                self._encode_frame(frame, time.monotonic())
+            else:
+                logger.warning("[%s] read failed at step %d, pos=%.1fs", self.camera_id, step, video_pos)
+
+            step += 1
+            if step % log_interval == 0:
+                logger.debug("[%s] progress: step=%d/%d", self.camera_id, step, total_steps)
+
+        logger.info("[%s] _run_video #%d done: completed %d/%d steps (stop=%s)", self.camera_id, run_id, step, total_steps, self.stop_event.is_set())
+
     def _run(self):
+        if self._finished:
+            logger.warning("[%s] _run called but already finished", self.camera_id)
+            return
+        if self._start_event is not None:
+            self._start_event.wait()
+
         cap = create_capture(self.source)
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
             self._finished = True
             return
 
+        logger.debug("[%s] _run started (is_stream=%s)", self.camera_id, self._is_stream)
+        if not self._is_stream:
+            self._run_video(cap)
+            cap.release()
+            self._finished = True
+            logger.info("Batch collector %s finished", self.camera_id)
+            if self.on_finished:
+                self.on_finished(self.camera_id)
+            return
+
+        next_capture = math.ceil(time.monotonic() / self.collect_interval) * self.collect_interval
+
         try:
             consecutive_failures = 0
             max_failures = 5
-            last_capture = 0.0
 
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    if self._is_stream:
-                        consecutive_failures += 1
-                        if consecutive_failures >= max_failures:
-                            logger.warning(
-                                "Batch collector %s reconnecting... (%d failures)",
-                                self.camera_id,
-                                consecutive_failures,
-                            )
-                            cap.release()
-                            time.sleep(1)
-                            cap = create_capture(self.source)
-                            if cap is None:
-                                logger.error("Batch collector %s reconnect failed for %s", self.camera_id, self.source)
-                                time.sleep(2)
-                                continue
-                            self.buffer.clear()
-                            consecutive_failures = 0
-                        else:
-                            time.sleep(0.5)
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        logger.warning(
+                            "Batch collector %s reconnecting... (%d failures)",
+                            self.camera_id,
+                            consecutive_failures,
+                        )
+                        cap.release()
+                        time.sleep(1)
+                        cap = create_capture(self.source)
+                        if cap is None:
+                            logger.error("Batch collector %s reconnect failed for %s", self.camera_id, self.source)
+                            time.sleep(2)
+                            continue
+                        self.buffer.clear()
+                        consecutive_failures = 0
                     else:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        logger.debug("Batch collector %s rewinding video", self.camera_id)
+                        time.sleep(0.5)
                     continue
 
                 consecutive_failures = 0
 
                 now = time.monotonic()
-                if now - last_capture >= self.collect_interval:
-                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.vision_quality])
-                    image_b64 = base64.b64encode(buf).decode("utf-8")
-                    entry = _FrameEntry(image_b64, now)
-                    self.buffer.append(entry)
-                    logger.debug(
-                        "[collect:%s] captured frame, buffer=%d",
-                        self.camera_id,
-                        len(self.buffer),
-                    )
-                    if self.on_capture:
-                        self.on_capture(self.camera_id, image_b64)
-                    last_capture = now
+                if now >= next_capture:
+                    self._encode_frame(frame, now)
+                    next_capture += self.collect_interval
+                    while next_capture <= now:
+                        next_capture += self.collect_interval
 
         except Exception:
             logger.exception("Batch collector %s crashed", self.camera_id)
