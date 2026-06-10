@@ -58,7 +58,7 @@ YOLO26을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 추�
 
 ```bash
 # 설정 파일 준비
-cp config/spaces.yaml.example config/spaces.yaml   # RTSP URL 등 실제 값으로 수정
+cp configuration.yaml.example configuration.yaml   # RTSP URL 등 실제 값으로 수정
 cp .env.example .env                               # LLM API key 입력
 
 # 빌드 및 실행 (CPU)
@@ -75,7 +75,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 pip install -r requirements.txt
 
 # 설정 파일 준비
-cp config/spaces.yaml.example config/spaces.yaml   # RTSP URL 등 실제 값으로 수정
+cp configuration.yaml.example configuration.yaml   # RTSP URL 등 실제 값으로 수정
 cp .env.example .env                               # LLM API key 입력
 
 # 실시간 모션 모드
@@ -89,7 +89,7 @@ python main.py --video ./sample.mp4
 
 ## Configuration (로컬 실행 시)
 
-### `config/spaces.yaml` — RTSP URL 등 설정 (`.gitignore` 제외)
+### `configuration.yaml` — 전체 설정 파일 (`.gitignore` 제외)
 
 ```yaml
 # === 공간 정의 (선택) ===
@@ -115,21 +115,13 @@ thresholds:
 ```
 
 
-`config/spaces.yaml.example`을 복사해서 사용하세요. `.gitignore`에 `config/spaces.yaml`이 제외되어 있습니다.
+`configuration.yaml.example`을 복사해서 사용하세요. `configuration.yaml`은 `.gitignore`에 제외되어 있습니다.
 
-### `.env` — LLM API key + Vision 설정 (`.gitignore` 제외)
+### `.env` — LLM API key + Database URL (`.gitignore` 제외)
 
 ```env
-API_BASE_URL=https://api.openai.com/v1  # 또는 다른 OpenAI 호환 엔드포인트
 API_KEY=your_api_key_here
-MODEL_NAME=gpt-4o-mini                    # 사용하려는 모델명
-
-# Vision 2-Layer Architecture
-VISION_COLLECT_INTERVAL=0.5              # Batch collector capture 간격 (초)
-VISION_COLLECT_COUNT=5                   # Per-camera buffer maxlen
-VISION_MAX_STALE=10.0                    # Buffer staleness 한계 (초)
-VISION_COOLDOWN_SECONDS=30.0             # Vision logging 후 cooldown
-VISION_EARLY_TRIGGER=5.0                # Cooldown offset
+# DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```
 
 ---
@@ -140,7 +132,7 @@ VISION_EARLY_TRIGGER=5.0                # Cooldown offset
 |------|------|
 | `--live` | 실시간 모션 모드 (구성 파일 기반) |
 | `--video <path>` | 오프라인 영상 분석 |
-| `--config <path>` | 구성 파일 경로 (기본: `config/spaces.yaml`) |
+| `--config <path>` | 구성 파일 경로 (기본: `configuration.yaml`) |
 
 ---
 
@@ -215,15 +207,13 @@ tracking-cano/
 ├── bench.py                         # 통합 벤치마크
 ├── requirements.txt                 # 의존성
 │
-├── config/
-│   ├── __init__.py
-│   ├── config.py                    # Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses
-│   ├── config_manager.py            # YAML 읽기 + 핫리로드(diff_configs)
-│   ├── spaces.yaml                  # RTSP URL 등 민감 정보 (gitignore)
-│   ├── spaces.yaml.example          # 커밋용 템플릿
-│   └── spaces_video.yaml            # 비디오 파일용 config 템플릿
+├── configuration.yaml               # 전체 설정 파일 (gitignore)
+├── configuration.yaml.example       # 커밋용 템플릿
+├── configuration.video.yaml         # 비디오 파일용 config 예시
+├── settings.py                      # Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses
 ├── core/
 │   ├── __init__.py
+│   ├── config_manager.py            # YAML 읽기 + 핫리로드(diff_configs)
 │   ├── orchestrator.py              # 다중 카메라 오케스트레이션 + _VisionScheduler
 │   ├── pipeline.py                  # 단일 카메라 파이프라인 (state hold/prev_states)
 │   └── vision_worker.py             # _BatchCollector (Layer 1 timer capture)

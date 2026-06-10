@@ -9,7 +9,7 @@ services:
       - .env
     environment: {}
     volumes:
-      - ./config:/app/config:ro
+      - ./configuration.yaml:/app/configuration.yaml:ro
       - ./logs:/app/logs
       - ./output:/app/output
     command: ["python", "main.py", "--live"]

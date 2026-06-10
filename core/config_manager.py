@@ -1,26 +1,17 @@
 """Configuration manager — YAML loading, hot-reload."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import yaml
-from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileModifiedEvent
 
-logger = logging.getLogger(__name__)
+from settings import LLMConfig, LogConfig, Thresholds, YOLOConfig
 
-DEFAULT_THRESHOLDS = {
-    "overlap": 0.3,
-    "distance": 50,
-    "speed_slow": 20,
-    "speed_fast": 40,
-    "dash_threshold": 15,
-    "rotation_threshold": 45,
-    "hysteresis": 5,
-    "min_frames": 3,
-}
+logger = logging.getLogger(__name__)
 
 # ── Data structures ────────────────────────────────────────────────
 
@@ -60,46 +51,63 @@ class SpaceConfig:
 
 
 class AppConfig:
-    """Full application configuration."""
+    """Full application configuration loaded from YAML."""
 
     def __init__(
         self,
         cameras: List[CameraConfig],
         spaces: List[SpaceConfig],
-        thresholds: Dict[str, Any],
+        thresholds: Thresholds,
+        yolo: YOLOConfig,
+        llm: LLMConfig,
+        log: LogConfig,
+        mode: str = "cv_pipeline",
     ):
         self.cameras = cameras
         self.spaces = spaces
         self.thresholds = thresholds
+        self.yolo = yolo
+        self.llm = llm
+        self.log = log
+        self.mode = mode
 
 # ── Loading ────────────────────────────────────────────────────────
 
 def load_config(
-    config_path: str = "config/spaces.yaml",
-    env_path: str = ".env",
+    config_path: str = "configuration.yaml",
 ) -> AppConfig:
     """Load and validate the configuration file.
 
     Args:
         config_path: Path to the YAML config file.
-        env_path: Path to the .env file.
 
     Returns:
-        Parsed AppConfig with resolved camera source URLs.
+        Parsed AppConfig with all settings resolved.
     """
-    load_dotenv(dotenv_path=env_path, override=True)
-
     raw = _read_yaml(config_path)
+
+    thresholds = Thresholds.from_dict(raw.get("thresholds", {}))
+    yolo = YOLOConfig.from_dict(raw.get("yolo", {}))
+    llm = LLMConfig.from_dict(raw.get("llm", {}))
+    log = LogConfig.from_dict(raw.get("logging", {}))
+    mode = raw.get("mode", "cv_pipeline")
+
+    # 12-factor: env overrides for secrets / deployment-specific values
+    llm.api_key = os.environ.get("API_KEY", llm.api_key)
+    if "DATABASE_URL" in os.environ:
+        log.db_url = os.environ["DATABASE_URL"]
+
     cameras = _parse_cameras(raw)
     spaces = _parse_spaces(raw)
-    thresholds = _parse_thresholds(raw)
 
     logger.info(
-        "Config loaded: %d cameras, %d spaces",
+        "Config loaded: %d cameras, %d spaces, mode=%s",
         len(cameras),
         len(spaces),
+        mode,
     )
-    return AppConfig(cameras, spaces, thresholds)
+    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode)
+
 
 def _read_yaml(path: str) -> Dict[str, Any]:
     """Read and parse a YAML file."""
@@ -111,6 +119,7 @@ def _read_yaml(path: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Config must be a YAML mapping, got {type(data).__name__}")
     return data
+
 
 def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
     """Parse the cameras list from raw config."""
@@ -130,6 +139,7 @@ def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
         cameras.append(CameraConfig(item))
     return cameras
 
+
 def _parse_spaces(raw: Dict[str, Any]) -> List[SpaceConfig]:
     """Parse the spaces list from raw config."""
     space_list = raw.get("spaces", [])
@@ -137,14 +147,6 @@ def _parse_spaces(raw: Dict[str, Any]) -> List[SpaceConfig]:
         raise ValueError("'spaces' must be a list")
     return [SpaceConfig(item) for item in space_list]
 
-def _parse_thresholds(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse thresholds, falling back to defaults."""
-    raw_thresholds = raw.get("thresholds", {})
-    if not isinstance(raw_thresholds, dict):
-        raise ValueError("'thresholds' must be a mapping")
-    result = dict(DEFAULT_THRESHOLDS)
-    result.update(raw_thresholds)
-    return result
 
 # ── Diff ────────────────────────────────────────────────────────────
 
@@ -181,6 +183,7 @@ def _build_cam_to_space(app_config: AppConfig) -> Dict[str, str]:
         for cam_id in space.camera_ids:
             mapping[cam_id] = space.id
     return mapping
+
 
 def diff_configs(old: AppConfig, new: AppConfig) -> ConfigDiff:
     old_cam_ids = {c.id for c in old.cameras}

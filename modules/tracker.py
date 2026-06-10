@@ -6,7 +6,7 @@ import numpy as np
 from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
-from config.config import YOLOConfig, Thresholds
+from settings import YOLOConfig, Thresholds
 from modules.tile_detector import HybridDetector
 
 

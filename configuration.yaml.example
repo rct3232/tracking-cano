@@ -1,0 +1,65 @@
+# === 실행 모드 ===
+# cv_pipeline: CV 기반 감지 + LLM 로깅 (기본)
+# llm_vision:  LLM vision-only 모드 (2-Layer Architecture)
+mode: cv_pipeline
+
+# === 움직임 감지 임계값 ===
+thresholds:
+  speed_slow: 20.0          # SLOW 기준 (px/frame)
+  speed_fast: 40.0          # FAST 기준 (px/frame)
+  overlap: 0.3              # 상호작용 IoU 임계값
+  distance: 50.0            # 상호작용 거리 임계값 (px)
+  dash_threshold: 15.0      # DASH 판정 프레임 차이
+  rotation_threshold: 45.0  # ROTATE 판정 각도 (deg)
+  hysteresis: 5.0           # 상태 변경 히스테리시스
+  min_frames: 3             # 상태 유지 최소 프레임 수
+
+# === YOLO 감지 설정 ===
+yolo:
+  conf_threshold: 0.25      # Confidence 임계값
+  iou_threshold: 0.70       # NMS IoU 임계값
+  tile_enabled: true        # 타일링 감지 활성화 (전체화면 실패 시 폴백)
+  tile_grid_x: 2            # 타일 가로 분할 수
+  tile_grid_y: 2            # 타일 세로 분할 수
+  tile_overlap: 20          # 타일 간 중복 픽셀
+  frame_skip: 0             # N개 프레임 중 1개 처리 (0=스킵 없음)
+
+# === LLM / Vision 설정 ===
+llm:
+  api_base_url: https://api.openai.com/v1
+  model_name: gpt-4o-mini
+  vision_enabled: true
+  vision_quality: 60        # JPEG 품질 (1-100)
+  vision_max_width: 1024    # 이미지 최대 너비
+  snapshot_count: 5         # Vision-only 모드 버퍼 크기
+  snapshot_interval: 30.0   # Vision-only 스냅샷 간격 (초)
+  collect_interval: 0.5     # Batch collector 캡처 간격 (초)
+  collect_count: 5          # Camera 버퍼 최대 크기 (sliding window)
+  max_stale_threshold: 10.0 # 버퍼 항목 유효 시간 (초)
+  cooldown_seconds: 30.0    # 로깅 후 전체 쿨다운 (초)
+  early_trigger: 5.0        # 실제 대기시간 = cooldown - early_trigger
+
+# === 로깅 설정 ===
+logging:
+  log_dir: logs
+  # DATABASE_URL은 .env 또는 환경변수로 설정 (여기서 설정 불가)
+
+# === 카메라 설정 (multi-camera 모드 필수) ===
+# cameras:
+#   - id: livingroom
+#     source: rtsp://user:pass@192.168.0.68:554/stream2
+#     status: active
+#     target_classes: [cat]
+#     model_size: n
+#     frame_skip: 15
+#     model_path: null        # 기본 모델 경로 override
+#     quantize: false
+#     interaction_classes: [couch, chair, bed]
+#     llm_system_prompt: "..."
+
+# === 공간 정의 ===
+# spaces:
+#   - id: room_livingroom
+#     name: 거실
+#     cameras: [livingroom, livingfront]
+#     llm_system_prompt: "..."

@@ -11,8 +11,8 @@ services:
       - OMP_NUM_THREADS=1
       - MKL_NUM_THREADS=1
     volumes:
-      - ./config:/app/config:ro
+      - ./configuration.yaml:/app/configuration.yaml:ro
       - ./logs:/app/logs
       - ./output:/app/output
-    command: ["python", "main.py", "--live", "--config", "config/spaces.yaml"]
+    command: ["python", "main.py", "--live"]
     restart: unless-stopped

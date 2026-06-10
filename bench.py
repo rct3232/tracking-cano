@@ -12,7 +12,7 @@ from typing import List
 
 import cv2
 
-from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
+from settings import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import load_config
 from core.pipeline import Pipeline
 from modules.tracker import Tracker
@@ -565,13 +565,13 @@ def _print_memory_results(results: list, video_paths: list[str]):
 
 def main():
     parser = argparse.ArgumentParser(description="Unified benchmark")
-    parser.add_argument("--config", type=str, default=None, help="Config YAML (spaces_video.yaml / spaces.yaml)")
+    parser.add_argument("--config", type=str, default=None, help="Config YAML path (e.g. configuration.yaml)")
     parser.add_argument("--video", type=str, default=None, help="Specific video path")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR), help="Directory to scan for videos")
     parser.add_argument("--mode", choices=["detect", "full", "both"], default="detect", help="Benchmark mode (default: detect)")
     parser.add_argument("--runtime", type=int, default=DEFAULT_RUNTIME, help=f"Runtime in seconds (default: {DEFAULT_RUNTIME})")
     parser.add_argument("--compare-classes", nargs="*", default=None, help="Compare classes. Use 'sel' for interaction classes. Omit for 80c only.")
-    parser.add_argument("--frame-skip", type=int, default=None, help="Frame skip interval (default: from config.py)")
+    parser.add_argument("--frame-skip", type=int, default=None, help="Frame skip interval (default: from configuration.yaml / settings.py)")
     parser.add_argument("--count", type=int, default=None, help="Concurrent video count (default: auto)")
     parser.add_argument("--full-video", action="store_true", help="Process entire video")
     parser.add_argument("--model", type=str, default=None, help="YOLO model path")

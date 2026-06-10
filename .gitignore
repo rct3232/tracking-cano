@@ -38,8 +38,8 @@ test_output/
 *.avi
 
 # Config (민감 정보 포함)
-config/*.yaml
-!config/*.example.yaml
+*.yaml
+!*.example.yaml
 
 # Output
 output/

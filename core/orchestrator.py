@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional
 
 import cv2
 
-from config.config import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
+from settings import LLMConfig, PipelineConfig, YOLOConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
 from core.pipeline import DetectResult, LogEvent, Pipeline
@@ -290,15 +290,15 @@ class _CameraWorker:
                 self.on_finished(self.camera_id)
 
 
-def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] = None, default_model_path: Optional[str] = None) -> PipelineConfig:
-    thresholds = Thresholds()
-    llm = LLMConfig()
-    if app_config:
-        for k, v in app_config.thresholds.items():
-            if hasattr(thresholds, k):
-                setattr(thresholds, k, v)
+def _make_pipeline_config(camera: CameraConfig, app_config: AppConfig, default_model_path: str | None = None) -> PipelineConfig:
     model_path = camera.model_path or default_model_path or f"yolo26{camera.model_size}.pt"
     yolo = YOLOConfig(
+        conf_threshold=app_config.yolo.conf_threshold,
+        iou_threshold=app_config.yolo.iou_threshold,
+        tile_enabled=app_config.yolo.tile_enabled,
+        tile_grid_x=app_config.yolo.tile_grid_x,
+        tile_grid_y=app_config.yolo.tile_grid_y,
+        tile_overlap=app_config.yolo.tile_overlap,
         model_size=camera.model_size,
         model_path=model_path,
         quantize=camera.quantize,
@@ -312,9 +312,9 @@ def _make_pipeline_config(camera: CameraConfig, app_config: Optional[AppConfig] 
     return PipelineConfig(
         target_classes=camera.target_classes,
         interaction_classes=camera.interaction_classes,
-        thresholds=thresholds,
+        thresholds=app_config.thresholds,
         yolo=yolo,
-        llm=llm,
+        llm=app_config.llm,
         llm_system_prompt=camera.llm_system_prompt,
     )
 
@@ -363,8 +363,7 @@ class Orchestrator:
                 continue
             self.add_camera(cam, barrier=barrier, loop_count=1)
 
-        from os import environ
-        mode = environ.get("MODE", "cv_pipeline")
+        mode = self.app_config.mode
         logger.debug("[init] MODE=%s space_logger=%r all_spaces=%d", mode, self.space_logger is not None, len(self.app_config.spaces))
         if mode == "llm_vision" and self.space_logger and self._vision_nlp_logger:
             self._vision_scheduler = _VisionScheduler(
@@ -390,8 +389,7 @@ class Orchestrator:
         config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
         pipeline = Pipeline(config, camera.id, self.space_logger, space_id, repo=self._repo)
         stop_event = threading.Event()
-        from os import environ
-        mode = environ.get("MODE", "cv_pipeline")
+        mode = self.app_config.mode
         if mode == "llm_vision":
             from core.vision_worker import _BatchCollector, _VisionOnlyWorker
             self._ensure_vision_nlp(config.llm)

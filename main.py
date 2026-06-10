@@ -13,8 +13,8 @@ from pathlib import Path
 
 import cv2
 
-from config.config import PipelineConfig, LogConfig
-from core.config_manager import ConfigWatcher
+from settings import PipelineConfig, YOLOConfig
+from core.config_manager import ConfigWatcher, load_config
 from core.pipeline import Pipeline
 from core.orchestrator import Orchestrator
 from nlp.logger import SpaceLogger
@@ -55,14 +55,13 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
-def run_live(config: PipelineConfig, camera_source: str, repo: LogRepository | None = None):
+def run_live(config: PipelineConfig, camera_source: str, mode: str = "cv_pipeline", repo: LogRepository | None = None):
     cap = create_capture(camera_source)
     if cap is None:
         logger.error("Cannot open camera %s", camera_source)
         return
 
     cam_id = camera_source.split("/")[-1] if "/" in camera_source else camera_source
-    mode = os.environ.get("MODE", "cv_pipeline")
     logger.info("Live mode started: %s (mode=%s)", camera_source, mode)
     pipeline = Pipeline(config, f"cam_{cam_id}", repo=repo)
     frame_id = 0
@@ -222,21 +221,20 @@ def main():
     group.add_argument("--live", nargs="?", const="", default=None,
                        help="Camera source. No arg = multi-camera from config file. With arg = single camera (RTSP URL)")
     group.add_argument("--video", type=str, help="Offline video file path")
-    parser.add_argument("--target-classes", nargs="+", default=["cat"], help="Target COCO classes")
-    parser.add_argument("--model", default="yolo26s.pt", help="YOLO model path")
-    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
-    parser.add_argument("--config", default="config/spaces.yaml", help="Config file path (multi-camera mode)")
+    parser.add_argument("--target-classes", nargs="+", help="Target COCO classes (default: from config)")
+    parser.add_argument("--model", help="YOLO model path (override)")
+    parser.add_argument("--config", default="configuration.yaml", help="Config file path")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG-level logging")
     args = parser.parse_args()
 
     if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
         logging.getLogger().setLevel(logging.DEBUG)
 
-    log_config = LogConfig()
+    app_config = load_config(args.config)
+    log_config = app_config.log
     setup_logging(log_config.log_dir)
 
-    mode = os.environ.get("MODE", "cv_pipeline")
-    logger.info("Running in mode: %s", mode)
+    logger.info("Running in mode: %s", app_config.mode)
 
     engine, Session = init_db(log_config.db_url)
     repo = LogRepository(Session) if Session else None
@@ -245,18 +243,43 @@ def main():
     else:
         logger.warning("No DB available — log entries will not be persisted")
 
-    config = PipelineConfig(
-        target_classes=args.target_classes,
-        interaction_classes=["couch", "chair", "dining table", "tv", "bed"],
-    )
-    config.yolo.model_path = args.model
-    config.yolo.conf_threshold = args.conf
-
     if args.live == "":
         run_multi(args.config, model_path=args.model, repo=repo)
     elif args.live:
-        run_live(config, args.live, repo=repo)
+        target_classes = args.target_classes or ["cat"]
+        config = PipelineConfig(
+            target_classes=target_classes,
+            interaction_classes=["couch", "chair", "dining table", "tv", "bed"],
+            thresholds=app_config.thresholds,
+            yolo=YOLOConfig(
+                conf_threshold=app_config.yolo.conf_threshold,
+                iou_threshold=app_config.yolo.iou_threshold,
+                tile_enabled=app_config.yolo.tile_enabled,
+                tile_grid_x=app_config.yolo.tile_grid_x,
+                tile_grid_y=app_config.yolo.tile_grid_y,
+                tile_overlap=app_config.yolo.tile_overlap,
+                model_path=args.model or app_config.yolo.model_path or "yolo26s.pt",
+            ),
+            llm=app_config.llm,
+        )
+        run_live(config, args.live, mode=app_config.mode, repo=repo)
     else:
+        target_classes = args.target_classes or ["cat"]
+        config = PipelineConfig(
+            target_classes=target_classes,
+            interaction_classes=["couch", "chair", "dining table", "tv", "bed"],
+            thresholds=app_config.thresholds,
+            yolo=YOLOConfig(
+                conf_threshold=app_config.yolo.conf_threshold,
+                iou_threshold=app_config.yolo.iou_threshold,
+                tile_enabled=app_config.yolo.tile_enabled,
+                tile_grid_x=app_config.yolo.tile_grid_x,
+                tile_grid_y=app_config.yolo.tile_grid_y,
+                tile_overlap=app_config.yolo.tile_overlap,
+                model_path=args.model or app_config.yolo.model_path or "yolo26s.pt",
+            ),
+            llm=app_config.llm,
+        )
         run_video(config, args.video, repo=repo)
 
 

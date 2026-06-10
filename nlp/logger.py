@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from openai import OpenAI
 
-from config.config import LLMConfig
+from settings import LLMConfig
 from modules.interaction_detector import InteractionResult
 from modules.tracker import MovementState, TrackedBBox
 from storage.database import LogEntry

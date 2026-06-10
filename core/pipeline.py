@@ -4,7 +4,7 @@ from typing import List, Optional, Set
 
 import numpy as np
 
-from config.config import PipelineConfig
+from settings import PipelineConfig
 from modules.analyzer import classify_movement
 from modules.interaction_detector import InteractionDetector, InteractionResult
 from modules.tracker import MovementState, Tracker, TrackedBBox

@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, Tuple
 import numpy as np
 
-from config.config import Thresholds
+from settings import Thresholds
 from modules.tracker import MovementState, TrackedBBox
 
 logger = logging.getLogger(__name__)
