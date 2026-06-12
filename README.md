@@ -9,23 +9,31 @@ YOLO26을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 추�
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ Layer 1: Batch Collector (per-camera daemon, 0.5s timer)          │
-│   Camera ─→ [_BatchCollector] ─→ buffer: deque[_FrameEntry](maxlen=5) │
-└─────────────────────────────────────────────────────────────────────┘
-                                                                      │
-┌─────────────────────────────────────────────────────────────────────┤
-│ Main Pipeline (per frame, frame_skip throttle)                     │
-│   [YOLO26] → [ByteTrack] → [Movement Analyzer]                    │
-│                            → [Interaction Detector] → [NLPLogger]  │
-└─────────────────────────────────────────────────────────────────────┤
-                                                                      │
-┌─────────────────────────────────────────────────────────────────────┤
-│ Layer 2: Space Scheduler (per-space state machine, 100ms polling) │
-│   DETECTING → (target_found) LOGGING+COOLING → DETECTING          │
-│               (all false) → immediate DETECTING restart            │
-│   [SpaceLogger.flush_vision()] → LLM 요약                         │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Detection Layer (per-camera daemon)                                 │
+│   Camera ─→ [YOLO26+ByteTrack] ─→ target_present?                  │
+│   (cv_pipeline)          ─or─     [_BatchCollector] → LLM vision   │
+│   (llm_vision)                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+                              │ (snapshot trigger: CV change / LLM detect)
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Snapshot Layer (space-level)                                        │
+│   [CameraSnapshot] ─→ buffer freeze ─→ [SpaceLogger.space_snapshot()]│
+│   ├─ vision_enabled=true:  LLM (images + tracking data) → JSON     │
+│   └─ vision_enabled=false: LLM (tracking data only) → JSON         │
+│   ↓                                                                 │
+│   [DB insert] detect×N + space×1 ──→ log_entries (batch_id 그룹핑)  │
+│   [Image save]  snapshot images ──→ output/                         │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ REST API (FastAPI, port 8000)                                       │
+│   /api/cameras/  /api/spaces/  /api/logs/  /api/config/            │
+│   /api/health    /api/status   /api/logs/stream (SSE)              │
+└──────────────────────────────────────────────────────────────────────┘
+```
 ```
 
 ---
@@ -33,11 +41,13 @@ YOLO26을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 추�
 ## Features
 
 - **YOLO26 기반 객체 추적** — 실시간 감지 및 ByteTrack 기반 ID 유지, 추적 대상 클래스 구성 가능
-- **상호작용 감지** — bbox 겹침 + 거리 결합으로 주변 물체 상호작용 판단
+- **Two detection modes** — `cv_pipeline`(YOLO+ByteTrack) 또는 `llm_vision`(LLM vision detect)
+- **Snapshot-based space logging** — detection trigger → space-level LLM 분석 → DB 저장(batch_id 그룹핑) + 이미지 저장
 - **다중 카메라·다중 공간** — YAML 구성 파일로 카메라와 공간의 관계 정의
-- **Vision 2-Layer Architecture** — Layer 1 timer-based batch collector (0.5s) + Layer 2 per-space state machine (DETECTING→LOGGING+COOLING), camera health tracking (healthy/degraded/dead)
-- **동적 구성 핫리로드** — 실행 중 구성 변경 시 자동 반영 (추가/삭제/재할당)
-- **자연어 로깅** — OpenAI API 호환 LLM을 통해 상태 변화 시점만 자연어로 표현
+- **동적 구성 핫리로드** — 실행 중 구성 변경 시 자동 반영 (watchdog)
+- **자연어 로깅** — OpenAI API 호환 LLM을 통해 snapshot 시점 자연어 분석
+- **REST API** — FastAPI 기반 카메라/공간/로그 CRUD + SSE 실시간 로그 스트리밍
+- **DB 저장** — SQLite(기본) 또는 PostgreSQL, console-only fallback 지원
 
 ---
 
@@ -49,6 +59,8 @@ YOLO26을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 추�
 | Video Capture | OpenCV |
 | Object Tracking | ByteTrack |
 | NLP Logging | OpenAI API 호환 LLM |
+| REST API | FastAPI + uvicorn |
+| Database | SQLAlchemy + SQLite / PostgreSQL |
 | Config | PyYAML + python-dotenv |
 | Hot Reload | watchdog |
 
@@ -137,6 +149,30 @@ LLM_KEY=your_llm_api_key_here
 
 ---
 
+## REST API
+
+실행 시 자동으로 FastAPI 서버가 포트 8000에서 시작됩니다.
+
+```bash
+# 헬스체크
+curl http://localhost:8000/api/health
+
+# 상태 조회
+curl http://localhost:8000/api/status
+
+# 로그 조회 (subject_id 필터)
+curl "http://localhost:8000/api/logs/?subject_id=livingroom"
+
+# SSE 로그 스트리밍
+curl -N http://localhost:8000/api/logs/stream
+```
+
+전체 API 명세는 [docs/api_reference.md](docs/api_reference.md)를 참조하세요.
+
+Swagger UI: http://localhost:8000/docs
+
+---
+
 ## Debugging
 
 ### `--verbose` / `-v` 플래그
@@ -164,16 +200,13 @@ python main.py --live rtsp://... --verbose
 | `target N vs person M: iou=X dist=Y -> nearby` | DEBUG | interaction_detector | IoU/거리 기반 관계 분류 |
 | `No detections` / `No tracking IDs` | DEBUG | tracker | 탐지 실패 vs 추적 실패 구분 |
 | `Detect: N boxes, M tracked, K interaction` | DEBUG | tracker | 추론 결과 요약 |
-| `[logger] enqueue: key (qsize=N)` | DEBUG | nlp.logger | LLM 큐 enqueue와 backlog |
-| `[logger] LLM call: camera=X prompt=N chars` | DEBUG | nlp.logger | LLM API 호출 시점과 비용 |
-| `[space:X] try_flush skipped: N < M` | DEBUG | nlp.logger | SpaceLogger flush 조건 미달 |
+| `[detect:cam] target_present=True` | INFO | nlp.logger | LLM vision detect 결과 |
+| `[snapshot:space] cameras=N reasoning=...` | INFO | nlp.logger | Snapshot LLM 응답 |
+| `[space:room] snapshot debounce suppress` | DEBUG | nlp.logger | Snapshot 디바운스 |
 | `[cam:X] collector encoded frame=N` | DEBUG | vision_worker | _BatchCollector 타이머 캡처 |
 | `[cam:X] collector buffer cleared (reconnect)` | INFO | vision_worker | 재연결 시 버퍼 초기화 |
-| `[scheduler] space=X state=DETECTING` | DEBUG | orchestrator | _VisionScheduler 상태 전이 |
-| `[scheduler] space=X camera_health={cam:healthy}` | DEBUG | orchestrator | detect 전 카메라 health 상태 |
-| `[scheduler] space=X no targets, immediate restart` | DEBUG | orchestrator | false detection → 즉시 재진입 |
-| `[vision_detect] camera=X found=Y` | DEBUG | nlp.logger | vision_detect() 결과 |
-| `[vision_detect] bbox parsed: [x1,y1,x2,y2]` | DEBUG | nlp.logger | LLM bbox 응답 파싱 성공 |
+| `[space:X] cam=Y target_present=True → snapshot` | INFO | orchestrator | detect 결과 snapshot 트리거 |
+| `[detect:cam] parse failed, raw: ...` | WARNING | nlp.logger | LLM 응답 JSON 파싱 실패 |
 | `disappeared: target N (cat)` | INFO | pipeline | target이 화면에서 사라짐 |
 | `Model loaded: yolo26n.pt` | INFO | tracker | YOLO 모델 적재 완료 |
 | `[CAM FPS] livingroom frame=312 fps=14.9` | INFO | orchestrator | 5초 간격 카메라별 FPS |
@@ -210,42 +243,58 @@ tracking-cano/
 │
 ├── configuration.yaml               # 전체 설정 파일 (gitignore)
 ├── configuration.yaml.example       # 커밋용 템플릿
-├── configuration.video.yaml         # 비디오 파일용 config 예시
 ├── settings.py                      # Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses
 ├── core/
 │   ├── __init__.py
 │   ├── config_manager.py            # YAML 읽기 + 핫리로드(diff_configs)
-│   ├── orchestrator.py              # 다중 카메라 오케스트레이션 + _VisionScheduler
-│   ├── pipeline.py                  # 단일 카메라 파이프라인 (state hold/prev_states)
-│   └── vision_worker.py             # _BatchCollector (Layer 1 timer capture)
+│   ├── orchestrator.py              # 다중 카메라 오케스트레이션 + snapshot 관리
+│   ├── pipeline.py                  # CV 파이프라인 (state hold/prev_states/disappear)
+│   ├── vision_worker.py             # _BatchCollector (LLM vision 전용 timer capture)
+│   └── yaml_writer.py               # YAML 쓰기 (REST API → config)
 ├── modules/
 │   ├── __init__.py
-│   ├── tracker.py                   # YOLO26 감지 + ByteTrack 추적 + HybridDetector(tile fallback)
+│   ├── tracker.py                   # YOLO26 감지 + ByteTrack 추적 + HybridDetector
 │   ├── analyzer.py                  # 이동 상태 분류 (STOPPED/SLOW/FAST/DASH/ROTATE)
 │   ├── interaction_detector.py      # IoU+거리 기반 상호작용 판단
 │   └── tile_detector.py             # HybridDetector — 타일 분할 추론 fallback
 ├── nlp/
 │   ├── __init__.py
-│   └── logger.py                    # LLMCallDebouncer, NLPLogger, SpaceLogger, try_flush()
+│   ├── logger.py                    # SpaceLogger + LLMCallDebouncer + snapshot 관리
+│   └── prompts.py                   # 시스템 프롬프트 (SNAPSHOT_VISION/TRACKING/DETECT)
+├── api/
+│   ├── __init__.py
+│   ├── server.py                    # FastAPI 앱 + uvicorn daemon thread
+│   ├── auth.py                      # Bearer token 인증
+│   ├── event_bus.py                 # Thread-safe pub/sub (SSE 스트리밍)
+│   ├── models.py                    # Pydantic request/response 모델
+│   └── routes/
+│       ├── __init__.py
+│       ├── cameras.py               # 카메라 CRUD
+│       ├── spaces.py                # 공간 CRUD + flush
+│       ├── logs.py                  # 로그 조회 + SSE
+│       ├── status.py                # 상태/헬스체크
+│       └── config.py                # 설정 읽기/쓰기
+├── storage/
+│   ├── __init__.py
+│   ├── database.py                  # SQLAlchemy engine + LogEntry 모델
+│   └── repository.py                # LogRepository.save() 추상화
 ├── utils/
 │   ├── __init__.py
 │   ├── video.py                     # create_capture(), resolve_source()
 │   └── image.py                     # draw_normalized_bbox()
 ├── docs/
+│   ├── api_reference.md             # REST API 문서 (this)
 │   ├── data_flow_design.md          # 데이터 플로우 상세 설계
 │   ├── interface_contract.md        # 모듈 인터페이스 정의
 │   ├── prompt_template_design.md    # LLM 프롬프트 템플릿 설계
 │   └── yaml_schema_design.md        # YAML 구성 스키마 설계
-├── logs/                            # 로그 출력 디렉토리
-├── output/                          # 출력 디렉토리 (저장 이미지 등)
+├── logs/                            # 로그/DB 디렉토리 (Docker volume)
+├── output/                          # 스냅샷 이미지 저장 (Docker volume)
 ├── .env                             # 민감 정보 (gitignore)
 ├── .env.example                     # 템플릿
 ├── .gitignore                       # git 제외 패턴
-├── Dockerfile                       # CPU 베이스 컨테이너
-├── Dockerfile.gpu                   # GPU 옵션 컨테이너
-├── Dockerfile.bench                 # 벤치마크 Docker (CPU)
-├── Dockerfile.bench.gpu             # 벤치마크 Docker (GPU)
-├── docker-compose.yml               # 기본 서비스 정의
+├── Dockerfile                       # 컨테이너 이미지
+├── docker-compose.yml               # 서비스 정의
 └── docker-compose.gpu.yml           # GPU 오버레이
 ```
 

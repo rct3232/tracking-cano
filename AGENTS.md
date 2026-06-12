@@ -1,12 +1,12 @@
 # AGENTS.md — tracking-cano
 
 ## 프로젝트 개요
-Layer 1: Camera → `_BatchCollector`(0.5s timer, buffer maxlen=5) → Layer 2: `_VisionScheduler`(per-space state machine: DETECTING→LOGGING+COOLING)
-Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector → NLPLogger → SpaceLogger → LLM
-- Orchestrator: `_CameraWorker`(daemon thread)로 다중 카메라 관리 + `_VisionScheduler`(100ms polling, space별 state machine)
-- Layer 1: `_BatchCollector` — per-camera daemon, timer 기반 encode+버퍼링, reconnect 시 buffer.clear()
-- Layer 2: `_VisionScheduler` — per-space DETECTING→LOGGING+COOLING, camera health(healthy/degraded/dead) 추적
-- SpaceLogger: 동일 공간 카메라 로그 취합 → 주기적 flush(10s) + 이벤트 기반 try_flush() + vision flush_vision()
+CV Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector → snapshot trigger
+LLM Vision: `_BatchCollector`(0.5s timer, buffer maxlen=5) → `SpaceLogger.vision_detect()` → snapshot trigger
+Snapshot: CameraSnapshot buffer freeze → `SpaceLogger.space_snapshot()` → DB(batch_id) + image save(output/)
+- Orchestrator: `_CameraWorker`(daemon thread)로 다중 카메라 관리 + `_SimpleVisionDetector`(round-robin detect)
+- Detection: `cv_pipeline`(YOLO+ByteTrack, target_present 변화 시 snapshot) 또는 `llm_vision`(LLM detect 시 snapshot)
+- Snapshot: `CameraSnapshot` registry → `space_snapshot()` → LLM space-level 분석 → per-camera detect + space log insert (동일 batch_id)
 
 ## Commandments
 0. **디버깅 시 DEBUG 로깅 필수** — 문제 진단이 필요한 경우 반드시 `--verbose`/`-v`(또는 `LOG_LEVEL=DEBUG`)를 추가하여 실행하고, `docker logs`(또는 stdout) 출력에서 증거를 수집할 것. 추측으로 원인을 단정하지 말 것.
@@ -25,12 +25,13 @@ Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detect
 | 파일 | 역할 |
 |------|------|
 | `core/pipeline.py` | `process_frame()` → state hold + disappear/interaction change 감지 |
-| `core/orchestrator.py` | `_CameraWorker`(daemon, 재연결), `_VisionScheduler`, `flush_spaces()`, `diff_configs()` hot-reload |
-| `core/vision_worker.py` | `_BatchCollector` — Layer 1 timer-based capture, sliding buffer, reconnect 시 buffer.clear() |
+| `core/pipeline.py` | `process_frame()` → state hold + disappear/interaction change 감지 |
+| `core/orchestrator.py` | `_CameraWorker`(daemon, 재연결), `_SimpleVisionDetector`, snapshot registry, `diff_configs()` hot-reload |
+| `core/vision_worker.py` | `_BatchCollector` — LLM vision용 timer-based capture, sliding buffer, reconnect 시 buffer.clear() |
 | `modules/tracker.py` | YOLO+ByteTrack, `_ensure_loaded()` 지연로드, HybridDetector(tile fallback) |
 | `modules/analyzer.py` | `classify_movement()` → STOPPED/SLOW/FAST/DASH/ROTATE |
 | `modules/interaction_detector.py` | IoU+거리 기반: interacting/contact/nearby |
-| `nlp/logger.py` | `LLMCallDebouncer`(3s), `NLPLogger.vision_detect()`, `SpaceLogger`, `try_flush()`, `flush_vision()` |
+| `nlp/logger.py` | `LLMCallDebouncer`(3s), `SpaceLogger.vision_detect()`, `SpaceLogger.space_snapshot()`, `_snapshot_fallback()` |
 | `settings.py` | Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses |
 | `core/config_manager.py` | YAML 로딩, `diff_configs()`, watchdog hot-reload |
 | `utils/video.py` | `create_capture()`, `resolve_source()` |
