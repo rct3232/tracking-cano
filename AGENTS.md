@@ -43,8 +43,9 @@ Main Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detect
 1. `configuration.yaml` 파일이 존재하는지 확인한다.
 2. 존재하지 않으면 `configuration.yaml.example`을 복사하여 편집한다.
 3. `.env` 파일이 존재하는지 확인한다.
-4. 존재하지 않으면 `.env.example`을 읽어 `API_KEY`를 입력받고 저장한다:
-   - `API_KEY` — LLM API 키 (필수)
+4. 존재하지 않으면 `.env.example`을 읽어 `LLM_KEY`와 `API_KEY`를 입력받고 저장한다:
+   - `LLM_KEY` — LLM API 키 (필수)
+   - `API_KEY` — REST API 인증 토큰 (선택)
 5. 생성된 `.env` 전체 내용을 유저에게 보여주고 "이대로 진행할까요?"라고 확인받는다.
 6. 유저가 승인하면 `docker compose up --build`(CPU) 또는 `-f docker-compose.gpu.yml`(GPU)를 실행한다.
    - GPU 여부는 유저에게 추가로 물어본다.

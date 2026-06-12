@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -12,7 +11,7 @@ from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
 from core.pipeline import DetectResult, LogEvent, Pipeline
 from core.vision_worker import _BatchCollector
-from nlp.logger import NLPLogger, SpaceLogger
+from nlp.logger import CameraSnapshot, SpaceLogger
 from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
@@ -24,90 +23,54 @@ def _is_stream_source(source: str) -> bool:
     return source.startswith(_STREAM_PREFIXES)
 
 
-@dataclass
-class _SpaceState:
-    id: str
-    name: str
-    camera_ids: List[str]
-    state: str = "detecting"       # "detecting" | "logging" | "cooling"
-    detect_idx: int = 0
-    cooldown_until: float = 0.0
-    llm_system_prompt: Optional[str] = None
-    target_classes: List[str] = field(default_factory=list)
-
-
-class _VisionScheduler:
-    """Per-space state machine manager (Layer 2).
-
-    Single thread, 100ms polling. Processes one detection step per space
-    per iteration. Spaces are independent — one space's LOGGING does not
-    affect another's DETECTING.
+class _SimpleVisionDetector:
+    """Periodically checks each camera's latest image for target detection.
+    On target found, triggers space snapshot via orchestrator.
     """
     def __init__(
         self,
         spaces: List[SpaceConfig],
         collectors: Dict[str, _BatchCollector],
-        nlp_logger: NLPLogger,
         space_logger: SpaceLogger,
+        orchestrator: "Orchestrator",
         config: LLMConfig,
         cam_to_space: Dict[str, str],
-        app_config: AppConfig,
         all_finished_check=None,
     ):
         self._stop_event = threading.Event()
-        self._states: Dict[str, _SpaceState] = {}
+        self._spaces = {s.id: s for s in spaces}
         self._collectors = collectors
-        self._nlp_logger = nlp_logger
         self._space_logger = space_logger
+        self._orchestrator = orchestrator
         self._config = config
         self._cam_to_space = cam_to_space
         self._is_all_finished = all_finished_check or (lambda: False)
-        self._thread = threading.Thread(target=self._run, daemon=True, name="vision-scheduler")
+        self._detect_index: Dict[str, int] = {}  # space_id → next camera index
+        for sid in self._spaces:
+            self._detect_index[sid] = 0
+        self._thread = threading.Thread(target=self._run, daemon=True, name="vision-detector")
 
-        for space in spaces:
-            target_classes = list(dict.fromkeys(
-                cls for cam in app_config.cameras
-                if cam.id in space.camera_ids and cam.target_classes
-                for cls in cam.target_classes
-            ))
-            self._states[space.id] = _SpaceState(
-                id=space.id,
-                name=space.name,
-                camera_ids=list(space.camera_ids),
-                llm_system_prompt=space.llm_system_prompt or None,
-                target_classes=target_classes,
-            )
-
-    def add_space(self, space: SpaceConfig, app_config: AppConfig):
-        target_classes = list(dict.fromkeys(
-            cls for cam in app_config.cameras
-            if cam.id in space.camera_ids and cam.target_classes
-            for cls in cam.target_classes
-        ))
-        self._states[space.id] = _SpaceState(
-            id=space.id,
-            name=space.name,
-            camera_ids=list(space.camera_ids),
-            llm_system_prompt=space.llm_system_prompt or None,
-            target_classes=target_classes,
-        )
+    def add_space(self, space: SpaceConfig):
+        self._spaces[space.id] = space
+        self._detect_index[space.id] = 0
 
     def remove_space(self, space_id: str):
-        self._states.pop(space_id, None)
+        self._spaces.pop(space_id, None)
+        self._detect_index.pop(space_id, None)
 
     def remove_camera_from_space(self, space_id: str, cam_id: str):
-        state = self._states.get(space_id)
-        if state and cam_id in state.camera_ids:
-            state.camera_ids.remove(cam_id)
+        space = self._spaces.get(space_id)
+        if space and cam_id in space.camera_ids:
+            space.camera_ids = [c for c in space.camera_ids if c != cam_id]
 
     def add_camera_to_space(self, space_id: str, cam_id: str):
-        state = self._states.get(space_id)
-        if state and cam_id not in state.camera_ids:
-            state.camera_ids.append(cam_id)
+        space = self._spaces.get(space_id)
+        if space and cam_id not in space.camera_ids:
+            space.camera_ids.append(cam_id)
 
     def start(self):
         self._thread.start()
-        logger.debug("[vision-scheduler] started with %d spaces", len(self._states))
+        logger.debug("[vision-detector] started with %d spaces", len(self._spaces))
 
     def stop(self):
         self._stop_event.set()
@@ -115,95 +78,100 @@ class _VisionScheduler:
 
     def _run(self):
         while not self._stop_event.is_set():
-            if self._is_all_finished():
-                self._stop_event.wait(1.0)
-                continue
-            now = time.monotonic()
-            for state in self._states.values():
-                if state.state == "cooling":
-                    if now >= state.cooldown_until:
-                        logger.debug("[space:%s] cooldown expired → detecting", state.id)
-                        state.state = "detecting"
-                        state.detect_idx = 0
-                if state.state == "detecting":
-                    self._process_detection_step(state)
-                elif state.state == "logging":
-                    pass
-            self._stop_event.wait(0.1)
+            try:
+                if self._is_all_finished():
+                    self._stop_event.wait(1.0)
+                    continue
 
-    def _get_camera_health(self, cam_id: str) -> tuple[str, str | None]:
-        collector = self._collectors.get(cam_id)
-        if collector is None or not collector.buffer:
-            return "dead", None
-        entry = collector.buffer[-1]
-        age = time.monotonic() - entry.captured_at
-        if age > self._config.max_stale_threshold:
-            return "degraded", None
-        return "healthy", entry.image_b64
+                for space_id, space in self._spaces.items():
+                    if not space.camera_ids:
+                        continue
+                    idx = self._detect_index.get(space_id, 0)
+                    if idx >= len(space.camera_ids):
+                        self._detect_index[space_id] = 0
+                        continue
+                    cam_id = space.camera_ids[idx]
+                    collector = self._collectors.get(cam_id)
+                    if not collector or not collector.buffer:
+                        self._detect_index[space_id] = idx + 1
+                        break
+                    entry = collector.buffer[-1]
+                    age = time.monotonic() - entry.captured_at
+                    health = "healthy"
+                    if age > self._config.max_stale_threshold:
+                        health = "degraded"
+                    if health != "healthy":
+                        self._detect_index[space_id] = idx + 1
+                        break
 
-    def _process_detection_step(self, state: _SpaceState):
-        while state.detect_idx < len(state.camera_ids):
-            cam_id = state.camera_ids[state.detect_idx]
-            health, image_b64 = self._get_camera_health(cam_id)
-            if health != "healthy" or image_b64 is None:
-                logger.debug("[space:%s] cam=%s %s skip", state.id, cam_id, health)
-                state.detect_idx += 1
-                continue
+                    # freeze: T0 시점 모든 카메라 buffer 복사
+                    frozen_buffers: Dict[str, List] = {}
+                    for cid in space.camera_ids:
+                        coll = self._collectors.get(cid)
+                        if coll and coll.buffer:
+                            frozen_buffers[cid] = list(coll.buffer)
 
-            result = self._nlp_logger.vision_detect(
-                camera_id=cam_id,
-                image_b64=image_b64,
-                llm_system_prompt=state.llm_system_prompt,
-                target_classes=state.target_classes,
-            )
-            if result is None:
-                logger.warning("[space:%s] cam=%s detect failed, skip", state.id, cam_id)
-                state.detect_idx += 1
-                continue
+                    logger.debug("[vision-detector] cam=%s calling vision_detect", cam_id)
+                    result = self._space_logger.vision_detect(
+                        camera_id=cam_id,
+                        image_b64=entry.image_b64,
+                        llm_system_prompt=space.llm_system_prompt or None,
+                        target_classes=self._get_target_classes(space_id) or None,
+                    )
+                    if result is None:
+                        logger.debug("[vision-detector] cam=%s vision_detect returned None → skip", cam_id)
+                        self._detect_index[space_id] = idx + 1
+                        break
 
-            if result.get("target_present", False):
-                logger.info("[space:%s] cam=%s target_present=True → immediate logging", state.id, cam_id)
-                self._transition_to_logging(state, detect_cam_id=cam_id, detect_image_b64=image_b64)
+                    if result.get("target_present", False):
+                        logger.info("[space:%s] cam=%s target_present=True → snapshot", space_id, cam_id)
+                        self._update_all_snapshots(space_id, frozen_buffers, detect_cam_id=cam_id, detect_entry=entry)
+                        self._orchestrator.request_space_snapshot(space_id)
+                        return
+
+                    self._detect_index[space_id] = idx + 1
+                    break
+                self._stop_event.wait(0.1)
+            except Exception:
+                logger.exception("[vision-detector] _run crashed")
                 return
 
-            state.detect_idx += 1
+    def _get_target_classes(self, space_id: str) -> List[str]:
+        """Collect unique target_classes from all cameras in a space."""
+        seen: List[str] = []
+        for cam in self._orchestrator.app_config.cameras:
+            if self._cam_to_space.get(cam.id) == space_id and cam.target_classes:
+                for cls in cam.target_classes:
+                    if cls not in seen:
+                        seen.append(cls)
+        return seen
+
+    def _update_all_snapshots(self, space_id: str, frozen_buffers: Dict[str, List],
+                               detect_cam_id: str | None = None, detect_entry=None):
+        space = self._spaces.get(space_id)
+        if not space:
             return
-
-        logger.debug("[space:%s] all cameras done, no target → immediate restart", state.id)
-        state.detect_idx = 0
-
-    def _transition_to_logging(self, state: _SpaceState,
-                               detect_cam_id: str | None = None,
-                               detect_image_b64: str | None = None):
-        logger.info("[space:%s] target found → logging + cooling", state.id)
-        state.state = "logging"
-
-        now = time.monotonic()
-        cooldown_duration = self._config.cooldown_seconds - self._config.early_trigger
-        state.cooldown_until = now + max(cooldown_duration, 0)
-
-        images: List[tuple[str, str]] = []
-        camera_health: Dict[str, str] = {}
-        for cam_id in state.camera_ids:
-            health, image_b64 = self._get_camera_health(cam_id)
-            camera_health[cam_id] = health
-            if cam_id == detect_cam_id and detect_image_b64 is not None:
-                image_b64 = detect_image_b64
-            if health == "healthy" and image_b64 is not None:
-                images.append((cam_id, image_b64))
-
-        self._space_logger.flush_vision(
-            space_id=state.id,
-            space_name=state.name,
-            nlp_logger=self._nlp_logger,
-            llm_system_prompt=state.llm_system_prompt,
-            target_classes=state.target_classes,
-            valid_camera_ids=state.camera_ids,
-            camera_health=camera_health,
-            override_images=images,
-        )
-
-        state.state = "cooling"
+        for cam_id in space.camera_ids:
+            images: List[str] = []
+            if cam_id == detect_cam_id and detect_entry is not None:
+                images = [detect_entry.image_b64]
+                other = [e.image_b64 for e in frozen_buffers.get(cam_id, []) if e is not detect_entry]
+                images.extend(other)
+            else:
+                frozen = frozen_buffers.get(cam_id)
+                if not frozen:
+                    continue
+                images = [e.image_b64 for e in frozen]
+            if not images:
+                continue
+            snap = CameraSnapshot(
+                camera_id=cam_id,
+                target_present=True,
+                timestamp=time.monotonic(),
+                image_b64=images[0],
+                images=images,
+            )
+            self._orchestrator.update_snapshot(cam_id, snap)
 
 
 class _CameraWorker:
@@ -216,6 +184,9 @@ class _CameraWorker:
         stop_event: threading.Event,
         frame_skip: int = 0,
         on_finished: Optional[Callable[[str], None]] = None,
+        orchestrator: Optional["Orchestrator"] = None,
+        space_id: Optional[str] = None,
+        vision_enabled: bool = False,
     ):
         self.camera_id = camera_id
         self.pipeline = pipeline
@@ -224,9 +195,27 @@ class _CameraWorker:
         self.stop_event = stop_event
         self.frame_skip = frame_skip
         self.on_finished = on_finished
+        self.orchestrator = orchestrator
+        self.space_id = space_id
+        self._vision_enabled = vision_enabled
         self._is_stream = _is_stream_source(source)
         self._finished = False
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"cam-{camera_id}")
+        self._vision_quality = pipeline.config.llm.vision_quality if hasattr(pipeline.config, 'llm') else 60
+        self._vision_max_width = pipeline.config.llm.vision_max_width if hasattr(pipeline.config, 'llm') else 1024
+
+    def _encode_frame(self, frame, target_coordinate=None, label=None):
+        h, w = frame.shape[:2]
+        if self._vision_max_width > 0 and w > self._vision_max_width:
+            scale = self._vision_max_width / w
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        import base64 as _b64
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._vision_quality])
+        raw_b64 = _b64.b64encode(buf).decode("utf-8")
+        if target_coordinate:
+            from utils.image import draw_normalized_bbox
+            return draw_normalized_bbox(raw_b64, target_coordinate, label=label)
+        return raw_b64
 
     def start(self):
         self.thread.start()
@@ -291,6 +280,37 @@ class _CameraWorker:
                         logger.info("[%s] target_present=true class=%s bbox=%s", self.camera_id, detect.class_name, detect.target_coordinate)
                     else:
                         logger.debug("[%s] target_present=false", self.camera_id)
+
+                    # Build snapshot and update registry
+                    image_b64 = None
+                    tracked_list = []
+                    interactions = []
+                    coord = None
+                    if detect.target_present:
+                        if log_event is not None:
+                            tracked_list = log_event.tracked_list
+                            interactions = log_event.interactions or []
+                            coord = log_event.target_coordinate
+                        else:
+                            coord = detect.target_coordinate
+                    if frame is not None:
+                        image_b64 = self._encode_frame(frame)  # raw frame only; bbox drawn at save time
+
+                    snap = CameraSnapshot(
+                        camera_id=self.camera_id,
+                        target_present=detect.target_present,
+                        timestamp=time.monotonic(),
+                        tracked_list=tracked_list,
+                        interactions=interactions,
+                        image_b64=image_b64,
+                        target_coordinate=coord,
+                    )
+                    if self.orchestrator:
+                        self.orchestrator.update_snapshot(self.camera_id, snap)
+
+                    # Interaction change → space snapshot
+                    if log_event is not None and self.space_id and self.orchestrator:
+                        self.orchestrator.request_space_snapshot(self.space_id)
                 else:
                     logger.debug("[%s] frame=%d skipped (interval=%d)", self.camera_id, frame_id, skip_interval)
                 frame_id += 1
@@ -347,20 +367,70 @@ def _make_pipeline_config(camera: CameraConfig, app_config: AppConfig, default_m
 
 
 class Orchestrator:
-    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None, default_model_path: Optional[str] = None, repo=None):
+    def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None,
+                 default_model_path: Optional[str] = None, repo=None, event_bus=None):
         self.app_config = app_config
         self.space_logger = space_logger
         self._default_model_path = default_model_path
         self._repo = repo
+        self._event_bus = event_bus
         self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
         self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
-        if self.space_logger:
-            for space in app_config.spaces:
-                self.space_logger.set_camera_count(space.id, len(space.camera_ids))
-        self._vision_nlp_logger: Optional[NLPLogger] = None
-        self._vision_scheduler: Optional[_VisionScheduler] = None
         self._collectors: Dict[str, _BatchCollector] = {}
+        self._vision_detector: Optional[_SimpleVisionDetector] = None
+        self._snapshots: Dict[str, CameraSnapshot] = {}
+        self._snapshot_debounce: Dict[str, float] = {}
+        self._snapshot_lock = threading.Lock()
+
+    def update_snapshot(self, camera_id: str, snapshot: CameraSnapshot):
+        with self._snapshot_lock:
+            self._snapshots[camera_id] = snapshot
+
+    def request_space_snapshot(self, space_id: str):
+        if not self.space_logger:
+            return
+
+        now = time.monotonic()
+        last = self._snapshot_debounce.get(space_id, 0)
+        if now - last < 5.0:
+            logger.debug("[space:%s] snapshot debounce", space_id)
+            return
+        self._snapshot_debounce[space_id] = now
+
+        with self._lock:
+            space_cameras = [cam_id for cam_id, sid in self._cam_to_space.items() if sid == space_id]
+        if not space_cameras:
+            return
+
+        snapshots: Dict[str, CameraSnapshot] = {}
+        with self._snapshot_lock:
+            for cam_id in space_cameras:
+                snap = self._snapshots.get(cam_id)
+                if snap is None:
+                    continue
+                snapshots[cam_id] = snap
+        if not snapshots:
+            return
+
+        space_obj = next((s for s in self.app_config.spaces if s.id == space_id), None)
+        space_name = space_obj.name if space_obj else space_id
+
+        target_classes: List[str] = []
+        for cam in self.app_config.cameras:
+            if self._cam_to_space.get(cam.id) == space_id and cam.target_classes:
+                for cls in cam.target_classes:
+                    if cls not in target_classes:
+                        target_classes.append(cls)
+
+        self.space_logger.space_snapshot(
+            space_id=space_id,
+            space_name=space_name,
+            snapshots=snapshots,
+            vision_enabled=self.app_config.llm.vision_enabled,
+            target_classes=target_classes or None,
+            llm_system_prompt=space_obj.llm_system_prompt if space_obj else None,
+        )
 
     def update_config(self, new_config: AppConfig):
         self.app_config = new_config
@@ -369,11 +439,6 @@ class Orchestrator:
     @property
     def spaces(self) -> list[SpaceConfig]:
         return self.app_config.spaces
-
-    def _ensure_vision_nlp(self, llm_config):
-        if self._vision_nlp_logger is None:
-            from nlp.logger import NLPLogger as NLPLoggerCls
-            self._vision_nlp_logger = NLPLoggerCls(llm_config, repo=self._repo)
 
     @property
     def all_finished(self) -> bool:
@@ -396,86 +461,78 @@ class Orchestrator:
 
         mode = self.app_config.mode
         logger.debug("[init] MODE=%s space_logger=%r all_spaces=%d", mode, self.space_logger is not None, len(self.app_config.spaces))
-        if mode == "llm_vision" and self.space_logger and self._vision_nlp_logger:
-            self._vision_scheduler = _VisionScheduler(
+        if mode == "llm_vision" and self.space_logger:
+            self._vision_detector = _SimpleVisionDetector(
                 spaces=self.app_config.spaces,
                 collectors=self._collectors,
-                nlp_logger=self._vision_nlp_logger,
                 space_logger=self.space_logger,
-                config=self._vision_nlp_logger.config,
+                orchestrator=self,
+                config=self.app_config.llm,
                 cam_to_space=self._cam_to_space,
-                app_config=self.app_config,
                 all_finished_check=lambda: self.all_finished,
             )
-            self._vision_scheduler.start()
+            self._vision_detector.start()
 
     def add_camera(self, camera: CameraConfig, start_event: threading.Event | None = None,
                    capture_start: float | None = None,
                    barrier: threading.Barrier | None = None, loop_count: int = 1):
         space_id = self._cam_to_space.get(camera.id)
-        cap = create_capture(camera.source)
-        if cap is None:
-            logger.error("Cannot open camera %s from %s", camera.id, camera.source)
-            return
-        config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
-        pipeline = Pipeline(config, camera.id, self.space_logger, space_id, repo=self._repo)
         stop_event = threading.Event()
         mode = self.app_config.mode
-        if mode == "llm_vision":
-            from core.vision_worker import _BatchCollector, _VisionOnlyWorker
-            self._ensure_vision_nlp(config.llm)
+        cap = None
 
-            space_id = self._cam_to_space.get(camera.id)
-            if space_id and self.space_logger:
-                def _on_collector_finished(cid: str):
-                    with self._lock:
-                        self._collectors.pop(cid, None)
-                    logger.info("Collector %s removed from orchestrator", cid)
-                collector = _BatchCollector(
-                    camera_id=camera.id,
-                    source=camera.source,
-                    stop_event=stop_event,
-                    collect_interval=config.llm.collect_interval,
-                    collect_count=config.llm.collect_count,
-                    vision_quality=config.llm.vision_quality,
-                    vision_max_width=config.llm.vision_max_width,
-                    on_finished=_on_collector_finished,
-                    start_event=start_event,
-                    capture_start=capture_start,
-                    loop_count=loop_count,
-                    barrier=barrier,
-                )
-                with self._lock:
-                    self._collectors[camera.id] = collector
-                collector.start()
-                logger.info("Batch collector %s started (space=%s)", camera.id, space_id)
+        if mode == "llm_vision":
+            from core.vision_worker import _BatchCollector
+            cap = create_capture(camera.source)
+            if cap is None:
+                logger.error("Cannot open camera %s from %s", camera.id, camera.source)
                 return
-            else:
-                # Non-space standalone path (legacy)
-                worker = _VisionOnlyWorker(
-                    camera_id=camera.id,
-                    source=camera.source,
-                    stop_event=stop_event,
-                    frame_skip=camera.frame_skip,
-                    snapshot_count=config.llm.snapshot_count,
-                    vision_quality=config.llm.vision_quality,
-                    vision_max_width=config.llm.vision_max_width,
-                    on_batch_ready=lambda **kw: self._vision_nlp_logger.vision_log(  # type: ignore[union-attr]
-                        kw["images"], kw["camera_id"],
-                        camera.llm_system_prompt, camera.target_classes,
-                    ),
-                    llm_system_prompt=camera.llm_system_prompt,
-                    target_classes=camera.target_classes,
-                )
+            config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
+
+            def _on_collector_finished(cid: str):
+                with self._lock:
+                    self._collectors.pop(cid, None)
+                logger.info("Collector %s removed from orchestrator", cid)
+
+            collector = _BatchCollector(
+                camera_id=camera.id,
+                source=camera.source,
+                stop_event=stop_event,
+                collect_interval=config.llm.collect_interval,
+                collect_count=config.llm.collect_count,
+                vision_quality=config.llm.vision_quality,
+                vision_max_width=config.llm.vision_max_width,
+                on_finished=_on_collector_finished,
+                start_event=start_event,
+                capture_start=capture_start,
+                loop_count=loop_count,
+                barrier=barrier,
+            )
+            with self._lock:
+                self._collectors[camera.id] = collector
+            collector.start()
+            logger.info("Batch collector %s started (space=%s, mode=%s)", camera.id, space_id, mode)
+            return
         else:
+            cap = create_capture(camera.source)
+            if cap is None:
+                logger.error("Cannot open camera %s from %s", camera.id, camera.source)
+                return
+            config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
+            pipeline = Pipeline(config, camera.id)
             worker = _CameraWorker(
                 camera.id, pipeline, cap, camera.source, stop_event, camera.frame_skip,
                 on_finished=self.worker_finished,
+                orchestrator=self,
+                space_id=space_id,
+                vision_enabled=self.app_config.llm.vision_enabled,
             )
-        with self._lock:
-            self._workers[camera.id] = worker
-        worker.start()
-        logger.info("Camera %s started (%s, space=%s, mode=%s)", camera.id, camera.source, space_id, mode)
+            with self._lock:
+                self._workers[camera.id] = worker
+            worker.start()
+            logger.info("Camera %s started (%s, space=%s, mode=%s)", camera.id, camera.source, space_id, mode)
+            if self._event_bus:
+                self._event_bus.publish({"type": "camera.added", "data": {"camera_id": camera.id}})
 
     def worker_finished(self, camera_id: str):
         with self._lock:
@@ -491,21 +548,22 @@ class Orchestrator:
         if collector:
             collector.stop()
         self._cam_to_space.pop(camera_id, None)
+        with self._snapshot_lock:
+            self._snapshots.pop(camera_id, None)
+        if self._event_bus:
+            self._event_bus.publish({"type": "camera.removed", "data": {"camera_id": camera_id}})
 
     def reassign_camera(self, camera_id: str, old_space_id: str, new_space_id: str):
         self._cam_to_space[camera_id] = new_space_id
-        if self.space_logger:
-            self.space_logger.flush(old_space_id, old_space_id)
-            old_space = next((s for s in self.spaces if s.id == old_space_id), None)
-            new_space = next((s for s in self.spaces if s.id == new_space_id), None)
-            if old_space:
-                self.space_logger.set_camera_count(old_space_id, len(old_space.camera_ids))
-            if new_space:
-                self.space_logger.set_camera_count(new_space_id, len(new_space.camera_ids))
+        with self._snapshot_lock:
+            self._snapshots.pop(camera_id, None)
         with self._lock:
             worker = self._workers.pop(camera_id, None)
+            collector = self._collectors.pop(camera_id, None)
         if worker:
             worker.stop()
+        if collector:
+            collector.stop()
         cam = next((c for c in self.app_config.cameras if c.id == camera_id), None)
         if cam:
             self.add_camera(cam)
@@ -513,20 +571,12 @@ class Orchestrator:
     def get_space_cameras(self, space_id: str) -> list[str]:
         for space in self.spaces:
             if space.id == space_id:
-                return space.camera_ids
+                return list(space.camera_ids)
         return []
 
-    def flush_spaces(self):
-        if not self.space_logger:
-            return
-        for space in self.spaces:
-            text = self.space_logger.flush(space.id, space.name)
-            if text:
-                logger.info("[%s] %s", space.id, text)
-
     def stop(self):
-        if self._vision_scheduler:
-            self._vision_scheduler.stop()
+        if self._vision_detector:
+            self._vision_detector.stop()
         with self._lock:
             collectors = list(self._collectors.values())
             workers = list(self._workers.values())

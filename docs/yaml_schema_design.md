@@ -150,7 +150,7 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 | 환경변수 | LLMConfig 필드 | 기본값 | 설명 |
 |---------|---------------|--------|------|
 | `API_BASE_URL` | `api_base_url` | `https://api.openai.com/v1` | API 엔드포인트 URL |
-| `API_KEY` | `api_key` | — | LLM API 키 |
+| `LLM_KEY` | `api_key` | — | LLM API 키 |
 | `MODEL_NAME` | `model_name` | `gpt-4o-mini` | 사용할 모델 ID |
 | `VISION_ENABLED` | `vision_enabled` | `1` | Vision 이미지 첨부 활성화 |
 | `VISION_QUALITY` | `vision_quality` | `60` | 이미지 JPEG 품질 (1-100) |

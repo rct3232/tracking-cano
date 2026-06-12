@@ -8,7 +8,6 @@ from settings import PipelineConfig
 from modules.analyzer import classify_movement
 from modules.interaction_detector import InteractionDetector, InteractionResult
 from modules.tracker import MovementState, Tracker, TrackedBBox
-from nlp.logger import NLPLogger, SpaceLogger
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +30,10 @@ class LogEvent:
 
 
 class Pipeline:
-    def __init__(self, config: PipelineConfig, camera_id: str = "cam_01", space_logger: Optional[SpaceLogger] = None, space_id: Optional[str] = None, repo=None):
+    def __init__(self, config: PipelineConfig, camera_id: str = "cam_01"):
         self.config = config
         self.camera_id = camera_id
-        self.space_logger = space_logger
-        self.space_id = space_id
         self.tracker = Tracker(config.yolo)
-        self.nlp_logger = NLPLogger(config.llm, repo=repo)
         self.interaction_detector = InteractionDetector(
             overlap_threshold=config.thresholds.overlap,
             distance_threshold=config.thresholds.distance,
@@ -103,28 +99,24 @@ class Pipeline:
                 continue
 
             if prev_state != state:
-                logger.debug("[%s] target %d state %s->%s hold=%d/%d", self.camera_id, t.track_id, prev_state.name, state.name, hold, self.config.thresholds.min_frames)
-                if hold >= self.config.thresholds.min_frames:
-                    self.nlp_logger.log([t], frame, self.camera_id, interactions, self.space_logger, self.space_id, target_classes=self.config.target_classes)
-                    log_event = LogEvent(
-                        tracked_list=[t],
-                        frame=frame,
-                        interactions=interactions,
-                        target_coordinate=target_coord,
-                        target_classes=self.config.target_classes,
-                    )
-                    self._prev_states[t.track_id] = state
-                    self._prev_frame_ids[t.track_id] = frame_id
-                    self._state_hold[t.track_id] = 0
-                    self._prev_interactions[t.track_id] = interactions
+                logger.debug("[%s] target %d state %s->%s hold=%d", self.camera_id, t.track_id, prev_state.name, state.name, hold)
+                log_event = LogEvent(
+                    tracked_list=[t],
+                    frame=frame,
+                    interactions=interactions,
+                    target_coordinate=target_coord,
+                    target_classes=self.config.target_classes,
+                )
+                self._prev_states[t.track_id] = state
+                self._prev_frame_ids[t.track_id] = frame_id
+                self._state_hold[t.track_id] = 0
+                self._prev_interactions[t.track_id] = interactions
             else:
-                if hold >= self.config.thresholds.min_frames:
-                    self._state_hold[t.track_id] = 0
+                self._state_hold[t.track_id] = 0
 
                 prev_interactions = self._prev_interactions.get(t.track_id)
                 if self._interactions_changed(prev_interactions, interactions):
                     logger.debug("[%s] target %d interactions changed", self.camera_id, t.track_id)
-                    self.nlp_logger.log([t], frame, self.camera_id, interactions, self.space_logger, self.space_id, target_classes=self.config.target_classes)
                     log_event = LogEvent(
                         tracked_list=[t],
                         frame=frame,
@@ -137,7 +129,7 @@ class Pipeline:
         return detect, log_event
 
     def stop(self):
-        self.nlp_logger.stop()
+        pass
 
     def _check_disappeared(self, current_ids: Set[int]) -> List[tuple]:
         disappeared = []

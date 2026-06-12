@@ -14,14 +14,13 @@ class LogEntry(Base):
     __tablename__ = "log_entries"
 
     id = Column(Integer, primary_key=True)
+    batch_id = Column(String(36), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     log_type = Column(String(20), nullable=False, index=True)
-    camera_id = Column(String(100), nullable=True, index=True)
-    space_id = Column(String(100), nullable=True, index=True)
+    subject_id = Column(String(100), nullable=True, index=True)
     target_present = Column(Boolean, nullable=True)
     description = Column(Text, nullable=True)
     target_coordinate = Column(Text, nullable=True)
-    reasoning = Column(Text, nullable=True)
     raw_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
 

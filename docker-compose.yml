@@ -14,5 +14,7 @@ services:
       - ./configuration.yaml:/app/configuration.yaml:ro
       - ./logs:/app/logs
       - ./output:/app/output
+    ports:
+      - "8000:8000"
     command: ["python", "main.py", "--live"]
     restart: unless-stopped

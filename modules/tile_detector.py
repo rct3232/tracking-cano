@@ -118,7 +118,8 @@ class HybridDetector:
 
     def _build_result(self, boxes: List[dict], frame: np.ndarray) -> object:
         class FakeBoxes:
-            pass
+            def __len__(self):
+                return len(self.xyxy) if hasattr(self, 'xyxy') and self.xyxy is not None else 0
         class FakeResults:
             pass
         fake = FakeResults()

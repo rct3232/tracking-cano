@@ -93,7 +93,7 @@ def load_config(
     mode = raw.get("mode", "cv_pipeline")
 
     # 12-factor: env overrides for secrets / deployment-specific values
-    llm.api_key = os.environ.get("API_KEY", llm.api_key)
+    llm.api_key = os.environ.get("LLM_KEY", llm.api_key)
     if "DATABASE_URL" in os.environ:
         log.db_url = os.environ["DATABASE_URL"]
 

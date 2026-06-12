@@ -12,7 +12,6 @@ thresholds:
   dash_threshold: 15.0      # DASH 판정 프레임 차이
   rotation_threshold: 45.0  # ROTATE 판정 각도 (deg)
   hysteresis: 5.0           # 상태 변경 히스테리시스
-  min_frames: 3             # 상태 유지 최소 프레임 수
 
 # === YOLO 감지 설정 ===
 yolo:
@@ -43,6 +42,10 @@ llm:
 logging:
   log_dir: logs
   # DATABASE_URL은 .env 또는 환경변수로 설정 (여기서 설정 불가)
+
+# === REST API 설정 ===
+api:
+  port: 8000
 
 # === 카메라 설정 (multi-camera 모드 필수) ===
 # cameras:

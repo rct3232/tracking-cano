@@ -32,7 +32,7 @@ class _BatchCollector:
     Reads every frame (RTSP decoder buffer management), but only encodes
     and appends to buffer on a collect_interval timer.
 
-    Space-aware mode: buffer is read externally by _VisionScheduler.
+    Space-aware mode: buffer is read externally by _SimpleVisionDetector.
     Standalone mode: pass on_capture callback for per-capture notification.
 
     For video file sources, uses seek-based capture aligned to a shared

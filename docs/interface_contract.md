@@ -125,7 +125,6 @@ class MovementState(Enum):
 | `dash_threshold` | 15 | px/frame² | 돌진 판단 가속도 임계값 |
 | `rotation_threshold` | 45 | deg | 회전 판단 방향 변화 임계값 |
 | `hysteresis` | 5 | px/frame | 상태 전환 히스테리시스 |
-| `min_frames` | 3 | frame | 상태 유지 최소 프레임 수 (플리커 방지) |
 
 
 ---

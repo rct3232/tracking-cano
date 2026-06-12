@@ -11,7 +11,6 @@ class Thresholds:
     dash_threshold: float = 15.0
     rotation_threshold: float = 45.0
     hysteresis: float = 5.0
-    min_frames: int = 3
 
     @classmethod
     def from_dict(cls, d: dict) -> 'Thresholds':

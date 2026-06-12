@@ -4,5 +4,11 @@ pyyaml
 python-dotenv
 watchdog
 openai
+lap>=0.5.12
 sqlalchemy>=2.0
 psycopg2-binary
+
+# REST API
+fastapi
+uvicorn[standard]
+sse-starlette

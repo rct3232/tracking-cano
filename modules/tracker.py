@@ -2,12 +2,15 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Tuple
 import logging
+import threading
 import numpy as np
 from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
 from settings import YOLOConfig, Thresholds
 from modules.tile_detector import HybridDetector
+
+_model_load_lock = threading.Lock()
 
 
 class MovementState(Enum):
@@ -65,18 +68,21 @@ class Tracker:
 
     def _ensure_loaded(self):
         if self.model is None:
-            self.model = YOLO(self.config.model_path)
-            if self.config.quantize:
-                self.model = self.model.quantize()
-            self.detector = HybridDetector(
-                self.model,
-                grid_x=self.config.tile_grid_x,
-                grid_y=self.config.tile_grid_y,
-                overlap=self.config.tile_overlap,
-                enabled=self.config.tile_enabled,
-                yolo_classes=self.config.yolo_classes,
-            )
-            logger.info("Model loaded: %s (quantize=%s)", self.config.model_path, self.config.quantize)
+            with _model_load_lock:
+                if self.model is not None:
+                    return
+                self.model = YOLO(self.config.model_path)
+                if self.config.quantize:
+                    self.model = self.model.quantize()
+                self.detector = HybridDetector(
+                    self.model,
+                    grid_x=self.config.tile_grid_x,
+                    grid_y=self.config.tile_grid_y,
+                    overlap=self.config.tile_overlap,
+                    enabled=self.config.tile_enabled,
+                    yolo_classes=self.config.yolo_classes,
+                )
+                logger.info("Model loaded: %s (quantize=%s)", self.config.model_path, self.config.quantize)
 
     def update(self, frame: np.ndarray, target_classes: List[str], frame_id: int, interaction_classes: List[str] | None = None) -> tuple[List[TrackedBBox], List[TrackedBBox]]:
         if interaction_classes is None:
@@ -101,8 +107,13 @@ class Tracker:
 
         boxes = result.boxes
         if not hasattr(boxes, "id") or boxes.id is None or len(boxes.id) == 0:
-            logger.debug("No tracking IDs from ByteTrack")
-            return [], []
+            if boxes.xyxy is not None and len(boxes.xyxy) > 0:
+                import torch
+                boxes.id = torch.tensor([float(i) for i in range(len(boxes.xyxy))])
+                logger.debug("Generated %d synthetic tracking IDs for tile detections", len(boxes.xyxy))
+            else:
+                logger.debug("No detections")
+                return [], []
 
         class_name_map = self._CLASS_NAME_MAP
         target_id_set = {k for k, v in class_name_map.items() if v in target_classes} if target_classes else set()

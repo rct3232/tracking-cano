@@ -16,7 +16,6 @@ from settings import LLMConfig, PipelineConfig, Thresholds, YOLOConfig
 from core.config_manager import load_config
 from core.pipeline import Pipeline
 from modules.tracker import Tracker
-from nlp.logger import SpaceLogger
 from utils.video import create_capture
 
 logging.basicConfig(level=logging.WARNING)
@@ -391,9 +390,6 @@ def _run_config_bench(app_config, runtime: float, frame_skip: int):
         print("No active cameras found.")
         return
 
-    max_cameras = max((len(s.camera_ids) for s in app_config.spaces), default=1)
-    space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras)
-
     stats_list: list[CamStats] = []
     workers: list[_BenchWorker] = []
     stop_event = threading.Event()
@@ -403,8 +399,7 @@ def _run_config_bench(app_config, runtime: float, frame_skip: int):
             cam.target_classes, cam.interaction_classes,
             model_size=cam.model_size, quantize=cam.quantize,
         )
-        space_id = next((s.id for s in app_config.spaces if cam.id in s.camera_ids), None)
-        pipeline = Pipeline(config, cam.id, space_logger, space_id)
+        pipeline = Pipeline(config, cam.id)
         stats = CamStats(camera_id=cam.id)
         stats_list.append(stats)
         worker = _BenchWorker(cam.id, cam.source, pipeline, stop_event, frame_skip, stats)

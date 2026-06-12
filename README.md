@@ -120,7 +120,8 @@ thresholds:
 ### `.env` — LLM API key + Database URL (`.gitignore` 제외)
 
 ```env
-API_KEY=your_api_key_here
+LLM_KEY=your_llm_api_key_here
+# API_KEY=your_rest_api_key_here
 # DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```
 

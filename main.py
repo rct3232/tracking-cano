@@ -55,7 +55,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
-def run_live(config: PipelineConfig, camera_source: str, mode: str = "cv_pipeline", repo: LogRepository | None = None):
+def run_live(config: PipelineConfig, camera_source: str):
     cap = create_capture(camera_source)
     if cap is None:
         logger.error("Cannot open camera %s", camera_source)
@@ -63,20 +63,10 @@ def run_live(config: PipelineConfig, camera_source: str, mode: str = "cv_pipelin
 
     cam_id = camera_source.split("/")[-1] if "/" in camera_source else camera_source
     logger.info("Live mode started: %s (mode=%s)", camera_source, mode)
-    pipeline = Pipeline(config, f"cam_{cam_id}", repo=repo)
+    pipeline = Pipeline(config, f"cam_{cam_id}")
     frame_id = 0
     consecutive_failures = 0
     max_failures = 5
-
-    if mode == "llm_vision":
-        from collections import deque
-        import base64 as b64mod
-        buffer = deque(maxlen=config.llm.snapshot_count)
-        last_batch_time = time.monotonic()
-        snapshot_interval = config.llm.snapshot_interval
-    else:
-        buffer = None
-        snapshot_interval = 0
 
     try:
         while _running:
@@ -104,28 +94,11 @@ def run_live(config: PipelineConfig, camera_source: str, mode: str = "cv_pipelin
 
             consecutive_failures = 0
 
-            if mode == "llm_vision":
-                import cv2 as cv2_lib
-                now = time.monotonic()
-                if now - last_batch_time >= snapshot_interval:
-                    _, buf = cv2_lib.imencode(".jpg", frame, [cv2_lib.IMWRITE_JPEG_QUALITY, config.llm.vision_quality])
-                    image_b64 = b64mod.b64encode(buf).decode("utf-8")
-                    buffer.append(image_b64)
-                    logger.debug("[vision:%s] buffer_size=%d", cam_id, len(buffer))
-                    if len(buffer) >= config.llm.snapshot_count:
-                        batch = list(buffer)
-                        pipeline.nlp_logger.vision_log(
-                            batch, f"cam_{cam_id}",
-                            config.llm_system_prompt, config.target_classes,
-                        )
-                        last_batch_time = time.monotonic()
-                        buffer.popleft()
-                elif len(buffer) > 0:
-                    detect, _ = pipeline.process_frame(frame, frame_id)
-                    if detect.target_present:
-                        logger.info("[cam_%s] target_present=true class=%s", cam_id, detect.class_name)
-                    else:
-                        logger.debug("[cam_%s] target_present=false", cam_id)
+            detect, _ = pipeline.process_frame(frame, frame_id)
+            if detect.target_present:
+                logger.info("[cam_%s] target_present=true class=%s bbox=%s", cam_id, detect.class_name, detect.target_coordinate)
+            else:
+                logger.debug("[cam_%s] target_present=false", cam_id)
 
             frame_id += 1
     finally:
@@ -142,7 +115,7 @@ def run_video(config: PipelineConfig, video_path: str, repo: LogRepository | Non
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     logger.info("Video mode: %s (fps=%.1f)", video_path, fps)
-    pipeline = Pipeline(config, "video", repo=repo)
+    pipeline = Pipeline(config, "video")
     frame_id = 0
 
     try:
@@ -167,28 +140,35 @@ def run_video(config: PipelineConfig, video_path: str, repo: LogRepository | Non
 
 def run_multi(config_path: str, model_path: str | None = None, repo: LogRepository | None = None):
     from core.config_manager import load_config
+    from api.event_bus import EventBus
+    from api.server import start_api
+
     app_config = load_config(config_path)
-    max_cameras = max((len(s.camera_ids) for s in app_config.spaces), default=1)
-    space_logger = SpaceLogger(PipelineConfig().llm, flush_threshold=max_cameras, repo=repo)
-    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path, repo=repo)
+    event_bus = EventBus()
+
+    space_logger = SpaceLogger(app_config.llm, repo=repo, event_bus=event_bus)
+    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path, repo=repo, event_bus=event_bus)
+
+    # Start REST API server in daemon thread
+    start_api(orchestrator=orchestrator, space_logger=space_logger, repo=repo, event_bus=event_bus)
     orchestrator.start()
     watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
     watcher.start()
 
-    flush_interval = 10.0
-    last_flush = 0.0
+    all_finished_since: float | None = None
     try:
         while _running:
             if orchestrator.all_finished:
+                if all_finished_since is None:
+                    all_finished_since = time.time()
+                elif time.time() - all_finished_since > 3.0:
+                    logger.info("All workers finished, exiting")
+                    break
                 time.sleep(1)
                 continue
-            now = time.time()
-            if now - last_flush >= flush_interval:
-                orchestrator.flush_spaces()
-                last_flush = now
+            all_finished_since = None
             time.sleep(1)
     finally:
-        orchestrator.flush_spaces()
         watcher.stop()
         orchestrator.stop()
 
@@ -199,11 +179,11 @@ def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new
     for cam_id, (old_space, new_space) in diff.reassigned_cameras.items():
         logger.info("Camera %s reassigned: %s → %s", cam_id, old_space, new_space)
         orchestrator.reassign_camera(cam_id, old_space, new_space)
-        if orchestrator._vision_scheduler:
+        if orchestrator._vision_detector:
             if old_space:
-                orchestrator._vision_scheduler.remove_camera_from_space(old_space, cam_id)
+                orchestrator._vision_detector.remove_camera_from_space(old_space, cam_id)
             if new_space:
-                orchestrator._vision_scheduler.add_camera_to_space(new_space, cam_id)
+                orchestrator._vision_detector.add_camera_to_space(new_space, cam_id)
     for cam_id in diff.added_cameras:
         cam = next((c for c in new_config.cameras if c.id == cam_id), None)
         if cam:
@@ -214,16 +194,11 @@ def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new
         space = next((s for s in new_config.spaces if s.id == space_id), None)
         if space:
             logger.info("Space added: %s (cameras: %d)", space_id, len(space.camera_ids))
-            if orchestrator._vision_scheduler:
-                orchestrator._vision_scheduler.add_space(space, new_config)
-            space_logger.set_camera_count(space_id, len(space.camera_ids))
+            if orchestrator._vision_detector:
+                orchestrator._vision_detector.add_space(space)
     for space_id in diff.removed_spaces:
-        text = space_logger.flush(space_id, space_id)
-        if text:
-            logger.info("[%s] (removed) %s", space_id, text)
-        space_logger.cleanup_space(space_id)
-        if orchestrator._vision_scheduler:
-            orchestrator._vision_scheduler.remove_space(space_id)
+        if orchestrator._vision_detector:
+            orchestrator._vision_detector.remove_space(space_id)
 
 
 def main():
@@ -273,7 +248,7 @@ def main():
             ),
             llm=app_config.llm,
         )
-        run_live(config, args.live, mode=app_config.mode, repo=repo)
+        run_live(config, args.live)
     else:
         target_classes = args.target_classes or ["cat"]
         config = PipelineConfig(
