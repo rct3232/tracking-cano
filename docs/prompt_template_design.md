@@ -2,7 +2,7 @@
 
 ## 1. 목적 및 범위
 
-객체 행동 관찰 전문가 역할을 위한 시스템 프롬프트, 상태 변화 보고용 유저 프롬프트 구조, LLM 호출 조건을 정의한다.
+객체 행동 관찰 전문가 역할을 위한 시스템 프롬프트, snapshot 분석용 유저 프롬프트 구조, LLM 호출 조건을 정의한다.
 
 ---
 
@@ -29,178 +29,108 @@ SYSTEM_PROMPT = (
 - **금지 사항:** 추측, 감정어, 확인되지 않은 정보
 - **길이 제한:** 최대 150 tokens (`max_tokens=150`)
 
-### 2.2 Vision Detect 프롬프트 — Layer 2 detection 전용
+### 2.2 Vision Detect 프롬프트 — 단일 프레임 LLM detect
 
-```python
-DETECT_SYSTEM_PROMPT = (
-    "You are a target detection assistant. "
-    "Analyze the image and determine if the target object(s) are present. "
-    "If any target is present, return a JSON object with 'target_found': true, "
-    "'target_classes': [list of detected class names], 'target_coordinate': "
-    "[x1, y1, x2, y2] normalized 0~1 (tight bounding box, 2-3 decimal places), "
-    "and 'description': 'concise one-sentence observation'. "
-    "If no target is found, return {'target_found': false, 'description': 'No target detected.'}. "
-    "Return ONLY valid JSON, no markdown, no code fences."
-)
+`nlp/prompts.py`의 `DETECT_SYSTEM_PROMPT`:
+```
+You are a target detection assistant...
+Return JSON: {target_present: bool, reasoning: str}
+Return ONLY valid JSON.
 ```
 
-### 2.3 Vision Space 종합 프롬프트 — 다중 카메라 vision + text 종합
+출력 형식: `{"target_present": true, "reasoning": "..."}`
 
-```python
-VISION_SPACE_SYSTEM_PROMPT = (
-    ...
-    # Per-camera detection results + camera health + bbox annotations
-    # Synthesizes multi-camera vision observations into one coherent sentence
-)
+### 2.3 Snapshot 프롬프트 — space-level 종합 분석
+
+`nlp/prompts.py`의 `SNAPSHOT_VISION_PROMPT` (vision_enabled=true) / `SNAPSHOT_TRACKING_PROMPT` (vision_enabled=false):
+
 ```
+You are a multi-camera space monitoring assistant...
+Analyze the camera feeds and determine target status.
 
-자세한 템플릿 구조는 섹션 8 참조.
+Return JSON format:
+{
+  "target_present": true/false,
+  "cameras": {
+    "camera_id": {
+      "target_present": true/false,
+      "description": "...",
+      "target_coordinate": [x1,y1,x2,y2]
+    }
+  },
+  "reasoning": "..."
+}
+Rules:
+- Do NOT confuse inanimate objects with the living target
+- When uncertain, default to false
+- Never guess
+- Only include cameras where you are CONFIDENT. Omit no-target cameras entirely.
+```
 
 ---
 
-## 3. 단일 카메라 상태 보고용 프롬프트 템플릿
+## 3. Snapshot 유저 프롬프트 템플릿
 
-### 3.1 템플릿 구조 (실제 logger.py `_build_prompt()`)
+### 3.1 vision_enabled=true — 이미지 + tracking data
 
-```python
-def _build_prompt(self, changes, timestamp, camera_id, interaction_results=None):
-    lines = [f"Timestamp: {timestamp}", f"Camera: {camera_id}", ""]
-    lines.append("Tracked objects:")
-    for c in changes:
-        if c.get("is_new"):
-            lines.append(f"- {c['class_name']}: APPEARED")
-        else:
-            movement = _state_to_movement(c["current_state"], c.get("direction", "unknown"))
-            lines.append(f"- {c['class_name']}: {movement}")
-    if interaction_results:
-        lines.append("")
-        lines.append("Nearby objects (include these in your description):")
-        for ir in interaction_results:
-            rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
-            lines.append(f"- {ir.class_name}: {rel}")
-    lines.append("")
-    lines.append("Describe the state changes AND the object's relationship with nearby objects in one sentence.")
-    return "\n".join(lines)
-```
-
-### 3.2 데이터 주입 형식
-
-**Tracked objects 블록:**
-```
-- {class_name}: {movement_description}
-- {class_name}: APPEARED
-```
-
-**Nearby objects 블록 (interaction 있을 때만):**
-```
-- {class_name}: touching
-- {class_name}: near
-```
-
-### 3.3 예시 렌더링 결과
+`space_snapshot()`은 각 카메라의 마지막 프레임(또는 버퍼 전체 5프레임)을 LLM에 전송:
 
 ```
-Timestamp: 2025-01-15T14:30:22.123Z
-Camera: cam_01
+Timestamp: {timestamp}
+Space: {space_name}
 
-Tracked objects:
-- cat: moving slowly up and right
+--- [livingroom] ---
+[image frames...]
+cat: stopped | nearby: couch (touching) | bbox [0.75, 0.56, 0.79, 0.66]
 
-Nearby objects (include these in your description):
-- couch: touching
+--- [hallway] ---
+[image frames...]
+(no target detected)
 
-Describe the state changes AND the object's relationship with nearby objects in one sentence.
+Target objects: cat, person
 ```
 
-### 3.4 참고: 이전 상태(prev_state) 전달
+### 3.2 vision_enabled=false — tracking data only
 
-현재 `_build_state_changes()`에서 `prev_state`는 항상 `None`으로 설정된다 (logger.py 버그). 이는 Pipeline의 `_prev_states`가 NLPLogger에 전달되지 않기 때문이며, PLAN.md에 별도 수정 작업으로 등록되어 있다.
+```
+Timestamp: {timestamp}
+Space: {space_name}
+
+Target objects: cat
+
+- livingroom: cat: rotating | nearby: couch (touching)
+- hallway: no target detected
+```
 
 ---
 
-## 4. 다중 카메라 공간별 종합 프롬프트 템플릿
+## 4. Snapshot 트리거 조건
 
-### 4.1 템플릿 구조 (실제 SpaceLogger.flush())
+### 4.1 cv_pipeline 모드
 
-```python
-prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
-for cam_id, texts in sorted(entries.items()):
-    for t in texts:
-        prompt_lines.append(f"- {cam_id}: {t}")
-prompt_lines.append("")
-prompt_lines.append("Synthesize these camera observations into one sentence.")
-prompt = "\n".join(prompt_lines)
-```
-
-### 4.2 데이터 주입 형식
-
-**Camera reports 형식:**
-```
-- {camera_id}: {single_camera_llm_response}
-```
-
-### 4.3 예시 렌더링 결과
-
-```
-Space: 거실
-Timestamp: 2025-01-15T14:30:22.123Z
-
-Camera reports:
-cam_01: 고양이(ID:3)가 소파 근처로 빠르게 이동하며 속도가 빨라졌다.
-cam_02: 고양이(ID:7)가 정지해 있었으나 이제 천천히 움직이기 시작했다.
-
-Synthesize the information from multiple cameras in this space into one coherent summary sentence.
-```
-
-**기대 응답:** "거실에서 두 마리의 고양이가 동시에 활동하기 시작했으며, 하나는 소파 쪽으로 빠르게 이동하고 다른 하나는 천천히 움직이고 있다."
-
-### 4.4 카메라 간 중복 처리
-
-- Re-ID 미구현: 각 카메라의 LLM 응답이 독립적으로 취합됨
-- SpaceLogger가 각 카메라의 텍스트를 모아 하나의 문장으로 종합
-- 중복 객체 판단 로직 없음 — 향후 Phase 4에서 추가
-
----
-
-## 5. 상태 변화 감지 로직 — LLM 호출 조건
-
-### 5.1 변화 감지 기준
-
-LLM은 다음 중 하나라도 발생 시 호출된다:
+`Pipeline.process_frame()`에서 target_present 상태 변화 감지 시 snapshot trigger:
 
 | 조건 | 설명 |
 |------|------|
-| 이동 상태 변경 | `STOPPED → SLOW_MOVE`, `SLOW_MOVE → FAST_MOVE` 등 |
-| 상호작용 시작/종료 | `NONE → NEARBY`, `CONTACT → NONE` 등 |
-| 객체 등장 | 새로운 `track_id`가 감지됨 |
-| 객체 소실 | 기존 `track_id`가 lost 상태가 됨 |
+| target 등장 | `prev.target_present=false → current=true` |
+| target 소실 | `prev.target_present=true → current=false` |
+| 상호작용 변화 | interaction target 변경 |
 
-### 5.2 디바운스 로직
+### 4.2 llm_vision 모드
+
+`_SimpleVisionDetector`가 round-robin으로 카메라별 `vision_detect()` 호출:
+- `target_present=true` → 즉시 snapshot trigger
+- 5초 디바운스 (space별)
+
+### 4.3 Snapshot 디바운스
 
 ```python
-class LLMCallDebouncer:
-    def __init__(self, cooldown_seconds: float = 3.0):
-        self.cooldown = cooldown_seconds
-        self._last_call: Dict[str, float] = {}
+# SpaceLogger: 5s cooldown for space_snapshot()
+debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
 
-    def should_call(self, key: str) -> bool:
-        now = time.time()
-        last = self._last_call.get(key, 0.0)
-        if now - last < self.cooldown:
-            return False
-        self._last_call[key] = now
-        return True
+# Orchestrator: 2nd layer debounce
+self._snapshot_debounce: Dict[str, float] = {}
 ```
-
-> NLPLogger에서는 key = `f"{camera_id}_batch"`, SpaceLogger에서는 key = space_id 를 사용한다.
-
-- **쿨다운:** 동일 공간·동일 객체에 대해 최소 3초 간격으로 LLM 호출
-- **이유:** 임계값 근처에서 상태가 왔다갔다 할 때 (예: `SLOW_MOVE ↔ FAST_MOVE`) 불필요한 호출 방지
-
-### 5.3 배치 vs 즉시 호출
-
-- **단일 카메라 (NLPLogger):** 상태 변화 감지 시점 → 디바운스 확인(3초) → 즉시 LLM 호출 (백그라운드 큐)
-- **다중 카메라 취합 (SpaceLogger):** 각 카메라 로그 수집 → try_flush()로 즉시 flush 시도 (flush_threshold 카메라 수 도달 시) + 10초 주기 안전망
 
 ---
 
@@ -261,99 +191,46 @@ state_change:
 | 전략 | 설명 |
 |------|------|
 | 시스템 프롬프트 최소화 | 역할 + 출력 형식만 포함, 예시는 제거 |
-| bbox 좌표 제외 | LLM이 해석할 필요 없는 숫자 데이터는 프롬프트에 포함 안 함 |
-| 변경 필드만 전달 | 디프 포맷: 이전 상태와 현재 상태의 차이만 주입 |
-| 방향명 단순화 | 8방위 (north, northeast, ...) 사용, 각도값은 제외 |
+| No-target 카메라 생략 | 프롬프트에 "Omit no-target cameras entirely" 규칙으로 토큰 절약 |
 
 ### 7.2 호출 빈도 감소
 
 | 전략 | 설명 |
 |------|------|
-| 디바운스 | 동일 객체/공간에서 3초 간격으로 LLM 호출 제한 |
-| 배치 처리 | Phase 2에서 N초 단위 공간별 변경 사항 수집 후 단일 호출 |
-| 경량 필터링 | "정지 → 정지" 같은 동일 상태는 LLM 호출 스킵 |
-
-### 7.3 모델 선택 전략
-
-| 시나리오 | 권장 모델 크기 | 이유 |
-|----------|---------------|------|
-| 단일 카메라 보고 | 소형 (예: gpt-4o-mini) | 단순 서술 작업, 복잡한 추론 불필요 |
-| 다중 카메라 종합 | 중형 이상 (예: gpt-4o) | 통합 추론 필요 |
-
-### 7.4 캐싱 고려사항
-
-- 동일 패턴의 LLM 응답을 캐시하는 것은 현재 설계에서는 구현하지 않음
-- 이유: 상태 변화는 매번 다른 객체/상황에 발생하므로 캐시 히트율이 낮을 것으로 예상
-- Phase 4에서 필요 시 도입 가능
+| 디바운스 | snapshot 5s cooldown (SpaceLogger) + 5s (Orchestrator) 이중 디바운스 |
+| 상태 변화 필터 | cv_pipeline: target_present 실제 변화 시에만 snapshot (매 프레임 아님) |
 
 ---
 
-## 8. Vision Detect 파이프라인
-
-### 8.1 전체 흐름
+## 8. Snapshot 파이프라인
 
 ```
-Layer 1 (_BatchCollector)            Layer 2 (_VisionScheduler)
-┌──────────────────────┐            ┌────────────────────────────┐
-│ 0.5s timer로 캡처      │            │ DETECTING 상태 진입         │
-│ buffer에 저장 (maxlen=5)│            │ → camera별 buffer 최신 entry │
-└──────────────────────┘            │ → NLPLogger.vision_detect() │
-                                    │   (DETECT_SYSTEM_PROMPT)    │
-                                    │ ↓                          │
-                                    │ target_found=true?          │
-                                    │ ├─ Yes: transition to       │
-                                    │ │  LOGGING+COOLING          │
-                                    │ │  → SpaceLogger            │
-                                    │ │   .flush_vision()         │
-                                    │ │   (VISION_SPACE_           │
-                                    │ │    SYSTEM_PROMPT)         │
-                                    │ └─ No: immediate restart    │
-                                    │    DETECTING                │
-                                    └────────────────────────────┘
+Detection Layer (cv_pipeline / llm_vision)
+    │ target_present 변화 감지
+    ▼
+CameraSnapshot registry 업데이트 (buffer freeze at T0)
+    │
+    ▼
+SpaceLogger.space_snapshot()
+    │ vision_enabled=true: LLM (images + tracking) → JSON
+    │ vision_enabled=false: LLM (tracking only) → JSON
+    │ 실패: _snapshot_fallback() → tracking data fallback
+    │
+    ├─ per-camera _db_insert (detect, batch_id 동일)
+    ├─ per-camera image save → output/
+    └─ space _db_insert (space, reasoning → description, same batch_id)
 ```
 
-### 8.2 vision_detect() — 단일 이미지 detection 호출
+### vision_detect() — 단일 이미지 detection
 
-- **프롬프트:** `DETECT_SYSTEM_PROMPT` (2.2절)
-- **입력:** base64 인코딩 이미지 1장 + `target_classes`
-- **출력:** JSON (`target_found`, `target_classes[]`, `target_coordinate`, `description`)
-- **특징:** 디바운스 없음 (호출자가 타이밍 관리), 동기 호출
-- **실패 처리:** LLM 호출 실패 또는 JSON 파싱 실패 시 `None` 반환 → caller가 false detection으로 간주
+- **프롬프트:** `DETECT_SYSTEM_PROMPT`
+- **입력:** base64 이미지 1장
+- **출력:** `{"target_present": bool, "reasoning": str}` 또는 `None`
+- **디바운스 없음** — 호출자(`_SimpleVisionDetector`)가 관리
 
-```python
-# 예시 vision_detect() 호출
-result = nlp_logger.vision_detect(
-    camera_id="cam_01",
-    image_b64="base64_encoded_jpeg...",
-    llm_system_prompt=DETECT_SYSTEM_PROMPT,
-    target_classes=["cat"],
-)
-# result 예시:
-# {"target_found": true, "target_classes": ["cat"],
-#  "target_coordinate": [0.12, 0.34, 0.45, 0.56],
-#  "description": "A cat is sitting on the floor near the sofa."}
-```
+### space_snapshot() — space-level 분석
 
-### 8.3 flush_vision() — 다중 카메라 vision 결과 종합
-
-- **프롬프트:** `VISION_SPACE_SYSTEM_PROMPT` (2.3절)
-- **입력:** 각 카메라의 `(camera_id, image_b64, captured_wall_clock)` 튜플 리스트 + `camera_health`
-- **출력:** 종합 자연어 문장 1개
-- **디바운스 키:** `f"{space_id}_vision"` — cooldown = `cooldown_seconds - early_trigger`
-- **Bbox 시각화:** LLM 응답에 `target_coordinate` 포함 시 `draw_normalized_bbox()`로 이미지 저장
-
-### 8.4 Camera health가 프롬프트에 미치는 영향
-
-| Health 상태 | 이미지 포함 | 텍스트 annotation |
-|-------------|-----------|------------------|
-| `healthy` | O | 정상 detection 결과 포함 |
-| `degraded` | X | `"(degraded: stale image)"` 추가 |
-| `dead` | X | `"(camera disconnected)"` 추가 |
-
-### 8.5 디바운스 키 정리
-
-| 구분 | 키 패턴 | 쿨다운 | 설명 |
-|------|---------|--------|------|
-| 단일 카메라 (텍스트) | `NLPLogger`: `f"{camera_id}_batch"` | `cooldown_seconds` (3s) | 이동 상태 변화 보고 |
-| 다중 카메어 공간 (텍스트) | `SpaceLogger`: space_id | `cooldown_seconds` (3s) | 공간 종합 텍스트 요약 |
-| 다중 카메라 공간 (vision) | `SpaceLogger`: `f"{space_id}_vision"` | `cooldown_seconds - early_trigger` | Vision detection + 공간 종합 |
+- vision_enabled=true → `SNAPSHOT_VISION_PROMPT` (이미지 + tracking)
+- vision_enabled=false → `SNAPSHOT_TRACKING_PROMPT` (tracking only)
+- 동일 `batch_id`로 detect×N + space×1 DB insert
+- bbox는 `_save_snapshot_image()`에서 CV 우선 → LLM fallback

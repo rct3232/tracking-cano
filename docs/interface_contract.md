@@ -1,8 +1,6 @@
-# Interface Contract — 설계 문서
+# Interface Contract
 
-## 1. 목적 및 범위
-
-모듈 간 데이터 전달 형식과 함수 인터페이스를 명확히 정의하여, `pipeline.py` 통합 시 인터페이스 불일치로 인한 버그를 방지한다.
+모듈 간 데이터 전달 형식과 함수 인터페이스를 정의한다.
 
 ---
 
@@ -191,7 +189,7 @@ def detect(self, target: TrackedBBox, interactions: List[TrackedBBox]) -> List[I
   - `is_contained` (dist==0.0)인 경우도 "interacting"으로 분류
   - 동시 다중 상호작용 가능
 
-### 5.5 vision_worker.py — Layer 1 Batch Collector
+### 5.5 vision_worker.py — _BatchCollector
 
 ```python
 class _BatchCollector:
@@ -213,71 +211,49 @@ class _BatchCollector:
     )
     def start(self) -> None       # 데몬 스레드 시작
     def stop(self) -> None        # stop_event 설정 + join(5s)
-    # Public attributes:
-    #   buffer: deque[_FrameEntry]  (maxlen=collect_count, sliding window)
-    #   thread: threading.Thread
+    # buffer: deque[_FrameEntry]  (maxlen=collect_count, sliding window)
 ```
 
-- **내부 루프:** `collect_interval` 간격으로 캡처 → `_encode_frame()` → buffer에 추가
-- **소스별 분기:** RTSP/webcam → 무한 루프 (`_run`), video file → `_run_video` (loop_count 소진 시 종료)
-- **동기화:** `start_event` + `math.ceil(capture_start/interval)*interval`로 첫 캡처 시점 정렬
-- **재연결:** `buffer.clear()`로 stale 이미지 방지
+- `llm_vision` 모드에서만 사용. `cv_pipeline` 모드에서는 미사용.
+- buffer는 snapshot 호출 시 shallow copy로 freeze → 원본은 계속 sliding
 
 ### 5.6 tile_detector.py — HybridDetector (타일 폴백)
 
 ```python
 class HybridDetector:
     def __init__(self, model, iou: float = 0.7, conf: float = 0.25)
-    def detect(
-        self,
-        frame: np.ndarray,
-        target_classes: List[str] | None = None,
-    ) -> List[BBox]
+    def detect(self, frame, target_classes=None) -> List[BBox]
 ```
 
-- **전략:** 전체 프레임 추론 우선 시도 → 결과 없거나 너무 작으면 타일 분할 추론 (`split_image_into_tiles`)
-- **타일 조건:** frame area > `TILE_THRESHOLD_AREA` (1024×1024 이상)
-- `tracker.py` 내부에서 `Tracker._ensure_loaded()` → `HybridDetector.detect()` 지연 로드
-
-### 5.7 nlp/logger.py — Vision Detect
+### 5.7 nlp/logger.py — Vision Detect & Snapshot
 
 ```python
-class NLPLogger:
-    def vision_detect(
-        self,
-        camera_id: str,
-        image_b64: str,
-        llm_system_prompt: str | None,
-        target_classes: list[str] | None,
-    ) -> dict | None
+# LLM vision detect (단일 프레임, 디바운스 없음)
+def vision_detect(
+    self, camera_id: str, image_b64: str,
+    llm_system_prompt: str | None, target_classes: list[str] | None,
+) -> dict | None
 ```
 
-- **동기 호출:** 단일 이미지 LLM vision API 호출
-- **프롬프트:** `DETECT_SYSTEM_PROMPT` 사용
-- **반환:** LLM JSON 응답 파싱 결과 (`target_coordinate` 포함) 또는 `None` (실패/파싱 오류)
-- **디바운스 없음:** 호출자(_VisionScheduler)가 타이밍 관리
+- **프롬프트:** `DETECT_SYSTEM_PROMPT`
+- **반환:** `{"target_present": bool, "reasoning": str}` 또는 `None`
+- 호출자(`_SimpleVisionDetector`)가 디바운스 관리
 
 ```python
-class SpaceLogger:
-    def flush_vision(
-        self,
-        space_id: str,
-        space_name: str,
-        nlp_logger: "NLPLogger",
-        llm_system_prompt: str | None = None,
-        target_classes: List[str] | None = None,
-        valid_camera_ids: List[str] | None = None,
-        camera_health: Dict[str, str] | None = None,
-        override_images: List[tuple[str, str, float]] | None = None,
-    ) -> Optional[str]
+# Space-level snapshot (detect trigger 시 호출)
+def space_snapshot(
+    self, space_id: str, space_name: str,
+    snapshots: Dict[str, CameraSnapshot],
+    vision_enabled: bool,
+    target_classes: List[str] | None = None,
+    llm_system_prompt: str | None = None,
+) -> Optional[str]
 ```
 
-- **두 가지 호출 경로:**
-  - `self._vision_buffer` (주기적 timer) 경유
-  - `override_images` (scheduler 직접 호출) 경유 — tuple = `(camera_id, image_b64, captured_wall_clock)`
-- **디바운스 키:** `f"{space_id}_vision"` (cooldown = `cooldown_seconds` 기본 30s → actual idle = cooldown - early_trigger)
-- **Camera health 반영:** degraded/dead 카메라는 텍스트 annotation으로만 포함
-- **Bbox drawing:** LLM 응답에 `target_coordinate`가 있으면 `draw_normalized_bbox()`로 시각화
+- `vision_enabled=true`: LLM에 이미지 + tracking data 전송
+- `vision_enabled=false`: LLM에 tracking data만 전송
+- 모든 camera snapshot을 동일 `batch_id`로 DB insert (detect×N + space×1)
+- 실패 시 `_snapshot_fallback()` → tracking data 기반 fallback 로그
 
 ### 5.8 utils/image.py — Bbox Drawing
 
@@ -288,43 +264,33 @@ def draw_normalized_bbox(
     color: tuple[int, int, int] = (0, 255, 0),
     label: str = "",
     quality: int = 60,
-) -> str                        # base64 encoded output image
+) -> str
 ```
 
-- **입력:** base64 이미지 디코드 → 좌표 클램프(0~1) → 사각형 + label 그리기 → base64 재인코딩
-- **사용처:** `_process_vision_batch_space()`에서 LLM 감지 결과 시각화
+- **사용처:** `_save_snapshot_image()`에서 CV bbox 또는 LLM bbox로 이미지 저장
 
 ---
 
 ## 6. 데이터 흐름도
 
+### cv_pipeline 모드
 ```
-frame (np.ndarray, BGR H×W×3)
-    │
-    ▼
-┌─────────────────────────────────────┐
-│ tracker.update()                     │  ← YOLO 추론 + ByteTrack 통합
-│   (detector는 tracker로 통합됨)       │  ← target_classes: config에서 로드
-└─────────────────────────────────────┘
-    │ (List[TrackedBBox], List[TrackedBBox])
-    ├─────────────────────────────────────────┐
-    ▼                                         ▼
-┌──────────────────────┐           ┌──────────────────────────┐
-│ analyzer             │           │ interaction_detector     │
-│ .classify_movement()  │           │ .detect()                │
-└──────────────────────┘           └──────────────────────────┘
-    │ (MovementState, meta)              │ List[InteractionResult]
-    ▼                                    ▼
-┌───────────────────────────────────────────────────────┐
-│ nlp_logger.log()                                      │
-│   ← MovementState + Interaction + 메타데이터           │
-└───────────────────────────────────────────────────────┘
-    │ str (자연어 로그)
-    ▼
-  콘솔 출력 + logs/ 파일 저장
+frame → tracker.update() → (TrackedBBox[], interaction[])
+    → analyzer.classify_movement() + interaction_detector.detect()
+    → Pipeline.process_frame() → state change 감지
+    → snapshot trigger → CameraSnapshot registry update
+    → SpaceLogger.space_snapshot() → DB + image save
 ```
 
-**병렬 처리 가능성:** analyzer와 interaction_detector는 동일한 `List[TrackedBBox]`를 입력으로 받지만 서로 독립적이므로, Phase 2 다중 카메라 환경에서 이 두 단계는 스레드 풀로 병렬화 가능.
+### llm_vision 모드
+```
+_BatchCollector (timer → encode → buffer)
+    → _SimpleVisionDetector (round-robin per space)
+    → SpaceLogger.vision_detect()
+    → target_present=True? → snapshot trigger
+    → CameraSnapshot registry update (buffer freeze)
+    → SpaceLogger.space_snapshot() → DB + image save
+```
 
 ---
 
@@ -336,39 +302,21 @@ frame (np.ndarray, BGR H×W×3)
 | ByteTrack 매칭 실패 | 기존 추적 상태 유지 (변경 없음) |
 | 카메라 연결 끊김 | 재연결 시도 → 5회 실패 시 해당 pipeline 종료 + `_BatchCollector` 재시작 |
 | LLM API 호출 실패 (텍스트) | 에러 로그 기록 + 프레임 처리 계속 (LLM 호출 스킵) |
-| LLM API 호출 실패 (vision) | False detection → `_VisionScheduler`가 즉시 DETECTING 재진입 (no cooldown wait) |
+| LLM API 호출 실패 (vision) | 에러 로그 + `None` 반환 → caller가 false detection으로 간주 |
 | LLM bbox 파싱 오류 | `target_coordinate` 누락 시 bbox drawing 스킵, detection 자체는 유효 처리 |
-| Stale buffer | `max_stale_threshold` 초과 → camera health `degraded` → detect skip |
-| Collector buffer empty | camera health `dead` → detect skip, space logging에 "(dead)" 표기 |
-| config 파일 파싱 오류 | 에러 메시지 출력 + 프로그램 종료 |
+| LLM snapshot 실패 | `_snapshot_fallback()` → tracking data 기반 fallback log |
+| Config 파일 파싱 오류 | 에러 메시지 출력 + 프로그램 종료 |
 
 ---
 
 ## 8. Config 기반 동적 값 매핑
 
-모든 설정값은 `config/spaces.yaml` → `config_manager.py` → `orchestrator`를 통해 각 컴포넌트에 로드된다:
-
 ```
-spaces.yaml ──→ config_manager.load_config() ──→ AppConfig
-  (thresholds, llm, cameras, spaces)                   │
-                                                       ├── thresholds → PipelineConfig (analyzer, interaction_detector)
-                                                       ├── llm → LLMConfig (nlp_logger)
-                                                       │     ├── vision_enabled / vision_quality / vision_max_width
-                                                       │     ├── snapshot_count / snapshot_interval (legacy)
-                                                       │     └── collect_interval / collect_count / max_stale_threshold
-                                                       │         cooldown_seconds / early_trigger (2-layer vision)
-                                                       ├── cameras → _CameraWorker + _BatchCollector
-                                                       └── spaces → _VisionScheduler + SpaceLogger
+configuration.yaml → config_manager.load_config() → AppConfig
+  (mode, thresholds, llm, cameras, spaces)    │
+                                               ├── mode → "cv_pipeline" or "llm_vision"
+                                               ├── thresholds → Thresholds
+                                               ├── llm → LLMConfig (SpaceLogger)
+                                               ├── cameras → _CameraWorker / _BatchCollector
+                                               └── spaces → _SimpleVisionDetector
 ```
-
-**Vision config fields (`LLMConfig`):**
-
-| 필드 | env var | 기본값 | 설명 |
-|------|---------|--------|------|
-| `collect_interval` | `VISION_COLLECT_INTERVAL` | 0.5 | Batch collector capture 간격 (초) |
-| `collect_count` | `VISION_COLLECT_COUNT` | 5 | Per-camera buffer maxlen |
-| `max_stale_threshold` | `VISION_MAX_STALE` | 10.0 | Buffer entry staleness 한계 (초) |
-| `cooldown_seconds` | `VISION_COOLDOWN_SECONDS` | 30.0 | Vision logging 후 cooldown (초) |
-| `early_trigger` | `VISION_EARLY_TRIGGER` | 5.0 | Cooldown offset: actual idle = cooldown - early_trigger |
-
-핫리로드 시 `ConfigWatcher`가 변경을 감지하면 orchestrator가 해당 camera의 pipeline을 재시작하여 새 설정이 적용된다.

@@ -1,81 +1,59 @@
-# 데이터 플로우 상세 설계 — 설계 문서
+# 데이터 플로우 상세 설계
 
-## 1. 목적 및 범위
+프레임별 처리 → snapshot → DB 저장의 단계별 흐름, 상태 전이도, 모드 분기 로직을 정의한다.
 
-프레임별 처리 파이프라인의 단계별 흐름, 상태 전이도, 상태 변화 감지 알고리즘, 상호작용 판단 로직, 다중 카메라 병렬 처리 모델, 모드 분기 로직을 정의한다.
+> **참고:** `_VisionScheduler`(per-space state machine), `NLPLogger`(단일 카메라 텍스트 LLM)는 Phase 14에서 제거됨. 현재는 snapshot 기반 단일 호출 아키텍처.
 
 ---
 
-## 2. 단일 프레임 처리 파이프라인
+## 2. 처리 흐름
 
-### 2.1 단계별 흐름도
-
-```
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Layer 1: Vision Capture (_BatchCollector — daemon thread)      │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │  Timer-based (collect_interval=0.5s) encode & buffer       │ │
-│  │  Read every frame (RTSP buffer mgmt), encode only on timer │ │
-│  │  buffer: deque[_FrameEntry](maxlen=collect_count=5)        │ │
-│  │  buffer.clear() on reconnect                               │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  Main Loop (per frame — parallel with Layer 1)                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │  Step 1: Frame Capture                                     │ │
-│  │    ├─ read() from cv2.VideoCapture (every frame, always)   │ │
-│  │    └─ frame_skip for main pipeline inference throttle      │ │
-│  │         ↓                                                  │ │
-│  │  Step 2: Detection & Tracking (tracker.py)                 │ │
-│  │    Input: frame, target_classes, frame_id                  │ │
-│  │    Output: (List[TrackedBBox], List[TrackedBBox])          │ │
-│  │    Budget: ~112ms (YOLO26s) / ~68ms (YOLO26n)             │ │
-│  │         ↓                                                  │ │
-│  │  Step 3a: Movement Analysis (analyzer.py)                  │ │
-│  │    Input: TrackedBBox, thresholds                          │ │
-│  │    Output: (MovementState, metadata_dict)                  │ │
-│  │    Budget: ~1ms                                            │ │
-│  │         ↓                                                  │ │
-│  │  Step 3b: Interaction Detection                            │ │
-│  │          (interaction_detector.py)                         │ │
-│  │    Input: target_tracked, all_tracked, thresholds           │ │
-│  │    Output: List[Interaction]                               │ │
-│  │    Budget: ~2ms                                            │ │
-│  │         ↓                                                  │ │
-│  │  Step 4: State Change Detection                            │ │
-│  │    ├─ prev_state vs current_state 비교                     │ │
-│  │    └─ 변화 감지 → LLM 호출 (디바운스 3s)                  │ │
-│  │         ↓                                                  │ │
-│  │  Step 5: Text Logging (NLPLogger)                          │ │
-│  │    └─ 자연어 로그 (연속 파이프라인)                        │ │
-│  │                                                             │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  Layer 2: Space Scheduler (_VisionScheduler — 100ms polling)    │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │  per-space state machine                                   │ │
-│  │  DETECTING → (target_found) LOGGING+COOLING                │ │
-│  │                (all false)  → immediate DETECTING restart  │ │
-│  │  Camera health: healthy → LLM detect / degraded → skip     │ │
-│  │                              dead → skip                    │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-```
-```
-
-### 2.2 프레임 드롭 조건 및 백프레시 전략
-
-- **Main pipeline:** `frame_skip` 파라미터로 추론 간격 제어 (기본 15프레임마다 1회 추론)
-- **Layer 1 (_BatchCollector):** 모든 프레임 read (RTSP 버퍼 관리), `collect_interval`(0.5s) 타이머에만 encode + buffer 저장
-- **이유:** 실시간 모드에서 지연 누적 방지가 최우선, 동시에 버퍼는 일정 간격으로 신선한 이미지 유지
-
-### 2.3 상태 캐시 생명주기
+### 2.1 아키텍처 개요
 
 ```
-초기화: pipeline 시작 시 → {track_id: StateCacheEntry} = {}
-갱신:  매 프레임 처리 후 → 해당 track_id의 캐시 갱신
-삭제:  ByteTrack가 lost 객체로 판단 시 → 캐시에서 제거
+cv_pipeline 모드:
+
+  Frame ──→ Pipeline.process_frame()
+              ├── tracker.update() (YOLO+ByteTrack)
+              ├── analyzer.classify_movement()
+              ├── interaction_detector.detect()
+              ├── _state_hold + _check_disappeared()
+              └── target_present 변화 감지 → snapshot trigger
+                    │
+                    ▼
+              CameraSnapshot registry buffer freeze
+                    │
+                    ▼
+              SpaceLogger.space_snapshot()
+                    ├── vision_enabled=true → LLM (images + tracking)
+                    ├── vision_enabled=false → LLM (tracking only)
+                    └── _snapshot_fallback() on failure
+
+
+llm_vision 모드:
+
+  Frame ──→ _BatchCollector (0.5s timer, maxlen=5 buffer)
+              │
+              ▼
+  _SimpleVisionDetector (round-robin per camera)
+              │ vision_detect() → target_present?
+              ▼
+              └── true → SpaceLogger.space_snapshot()
+              └── false → skip
+```
+
+### 2.2 프레임 스킵
+
+- **cv_pipeline:** `frame_skip` 파라미터로 YOLO 추론 간격 제어 (기본 15프레임마다 1회 추론)
+- **llm_vision:** 모든 프레임 read, `collect_interval`(0.5s) 타이머에만 encode + buffer 저장
+- **이유:** 실시간 모드에서 지연 누적 방지
+
+### 2.3 cv_pipeline 상태 캐시 생명주기
+
+```
+초기화: {track_id: StateCacheEntry} = {}
+갱신:  매 프레임 처리 후 해당 track_id 캐시 갱신
+삭제:  ByteTrack lost 판단 시 캐시에서 제거
 ```
 
 ```python
@@ -85,53 +63,8 @@ class StateCacheEntry:
     prev_interaction_type: InteractionType
     prev_speed: float
     prev_direction_angle: float
-    frame_count: int          # 상태 유지 프레임 수 (플리커 방지용)
+    frame_count: int
 ```
-
----
-
-## 2.4 Vision 2-Layer Architecture
-
-### 2.4.1 Layer 1: _BatchCollector (per-camera daemon thread)
-
-모든 카메라에 대해 독립적인 `_BatchCollector` 데몬 스레드가 실행된다:
-
-| 속성 | 값 |
-|------|-----|
-| Capture interval | `collect_interval` (기본 0.5s) |
-| Buffer size | `collect_count` (기본 5, sliding window) |
-| Encode | JPEG quality `vision_quality` (기본 60), resize to `vision_max_width` (1024px) |
-| Stale threshold | `max_stale_threshold` (기본 10s) — 초과 시 degraded 처리 |
-
-**동작:** read()는 매 프레임 수행 (RTSP UDP 버퍼 관리), encode + buffer 저장은 타이머에만 수행.
-**Reconnect:** `buffer.clear()`를 호출하여 reconnect 직후 stale 이미지 전송 방지.
-**동기화:** `start_event`를 통해 여러 카메라의 첫 캡처 시점을 동기화 (`math.ceil` alignment).
-
-### 2.4.2 Layer 2: _VisionScheduler (per-space state machine)
-
-`orchestrator.py`의 `_VisionScheduler`가 100ms 간격으로 polling하며, 한 사이클에 한 space씩 처리:
-
-```
-DETECTING ──→ target_found ──→ LOGGING+COOLING ──→ timer expire ──→ DETECTING (다음 사이클)
-    │                                              (cooldown - early_trigger)
-    └── all false ──→ immediate DETECTING restart
-```
-
-| 상태 | 설명 |
-|------|------|
-| `DETECTING` | `NLPLogger.vision_detect()` 호출 — 버퍼에서 최신 프레임을 LLM vision API로 전송 |
-| `LOGGING+COOLING` | detect 결과 processing + `SpaceLogger.flush_vision()` 호출; 쿨다운 타이머 동작 |
-| Immediate restart | 모든 카메라가 false detection이면 타이머 대기 없이 즉시 DETECTING 재진입 |
-
-**Space 독립성:** 각 space의 state machine은 완전히 독립적 — 한 space가 LOGGING 중이어도 다른 space는 DETECTING 가능.
-
-### 2.4.3 Camera Health 추적
-
-| 상태 | 조건 | 처리 |
-|------|------|------|
-| `healthy` | 버퍼 최신 entry가 `max_stale_threshold` 이내 | LLM detect에 이미지 포함 |
-| `degraded` | 버퍼 최신 entry가 `max_stale_threshold` 초과 | detect skip, 텍스트에 "(degraded)" 표기 |
-| `dead` | 버퍼가 비어 있거나 collector thread 종료됨 | detect skip, 텍스트에 "(dead)" 표기 |
 
 ---
 
@@ -321,14 +254,11 @@ Python의 GIL(Global Interpreter Lock)로 인해, 순수 Python 연산은 스레
 
 ### 6.4 오케스트레이터 역할 정의
 
-1. 카메라별 파이프라인 시작/종료/재시작 (`_CameraWorker`)
-2. 공간별 로그 수집 및 LLM 호출 디스패치 (`SpaceLogger.flush()` / `flush_vision()`)
-3. **Vision Layer 2 state machine 운영 (`_VisionScheduler`)**
-   - 100ms polling loop, space별 독립 상태 관리
-   - `_process_detection_step()` → `_transition_to_logging()` 체인
-4. **Camera health 추적 (`_get_camera_health()`):** 각 카메라 버퍼의 staleness 확인 → healthy/degraded/dead 결정
-5. **Capture timing 동기화:** `start_event` + `math.ceil` alignment으로 다중 카메라 첫 캡처 시점 정렬
-6. 구성 변경 시 안전한 전환 (실행 중인 프레임 처리 완료 대기), `diff_configs()` hot-reload
+1. 카메라별 파이프라인 시작/종료/재시작 (`_CameraWorker` daemon thread, 3회 재연결)
+2. llm_vision 모드: `_SimpleVisionDetector` round-robin detect → target_present 시 snapshot trigger
+3. Snapshot debounce (orchestrator-level 2nd layer)
+4. `diff_configs()` hot-reload — 변경된 camera pipeline만 재시작
+5. CameraSnapshot registry — snapshot 시 카메라별 현재 프레임 freeze
 
 ---
 
@@ -357,15 +287,14 @@ python main.py --video <path> → VideoReader: 파일 오픈 → 프레임 수�
 
 `pipeline.py` 내부의 `tracker.update → analyzer → logger` 흐름은 모드에 관계없이 동일해야 함 (DRY 원칙). (detector는 tracker로 통합됨)
 
-### 7.4 다중 카메라 혼합 모드 (Vision 2-Layer)
+### 7.4 다중 카메라 (llm_vision 모드)
 
 `_BatchCollector`가 소스 타입에 따라 다른 동작:
 
-| 소스 | _BatchCollector 동작 | 종료 조건 |
-|------|---------------------|-----------|
-| RTSP/Webcam | 타이머 기반 무한 캡처 (`_run` → `while not stop_event`) | SIGINT/SIGTERM |
-| Video file | 프레임 종료 시 stop (`_run_video` → `loop_count` 도달) | 파일 끝 + on_finished 콜백 |
-| Directory | 파일逐个 순회 (`resolve_source` → file list) | 모든 파일 완료 |
+| 소스 | 동작 | 종료 조건 |
+|------|------|-----------|
+| RTSP/Webcam | 타이머 기반 무한 캡처 (`while not stop_event`) | SIGINT/SIGTERM |
+| Video file | 프레임 종료 시 stop | 파일 끝 |
+| Directory | 파일 순회 (`resolve_source`) | 모든 파일 완료 |
 
-`_VisionScheduler`는 live/file 모두 동일하게 동작 — 카메라 health 상태에 따라 처리 여부 결정.
-`main.py --live`로 시작 시 단일 인자 없으면 multi-camera mode (YAML config 기반).
+`main.py --live` 단일 인자 = multi-camera mode (YAML config 기반).

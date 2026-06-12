@@ -1,21 +1,24 @@
-# YAML 구성 스키마 상세 설계 — 설계 문서
+# YAML 구성 스키마 상세 설계
 
 ## 1. 목적 및 범위
 
-`config/spaces.yaml`의 완전한 스키마 정의를 문서화하여, `config_manager.py` 구현 시 일관된 유효성 검사 규칙과 핫리로드 차분 계산의 근거를 제공한다.
+`configuration.yaml`의 완전한 스키마 정의를 문서화한다.
 
 ---
 
 ## 2. 최상위 스키마 구조
 
 ```yaml
-spaces:       # 배열 — 공간 정의 (선택적, 디폴트: 단일 기본 공간)
+mode:         # 문자열 — 실행 모드: "cv_pipeline" | "llm_vision"
+spaces:       # 배열 — 공간 정의 (선택)
 cameras:      # 배열 — 카메라 정의 (필수)
-thresholds:   # 객체  — 임계값 설정 (선택적, 디폴트 존재)
+thresholds:   # 객체 — 임계값 설정 (선택, 기본값 존재)
+llm:          # 객체 — LLM 설정 (선택, 기본값 존재)
+logging:      # 객체 — DB/로그 디렉토리 설정 (선택)
 ```
 
 - 허용되지 않는 최상위 키는 무시하며 경고 로그 출력
-- `cameras` 배열은 최소 1개 이상이어야 함 (단, 현재 코드는 미검증)
+- `cameras` 배열은 최소 1개 이상이어야 함
 
 ---
 
@@ -60,8 +63,13 @@ spaces:
 | `id` | string | ✅ | — | 카메라 고유 식별자 |
 | `source` | string | ✅ | — | 영상 소스 경로/주소 |
 | `status` | enum | ❌ | `"active"` | 활성화 여부 |
-| `target_classes` | array[string] | ❌ | `[cat, person]` | 추적 대상 COCO 클래스 |
-| `interaction_classes` | array[string] | ❌ | 모든 감지 클래스 | 상호작용 대상 COCO 클래스 필터 (선택) |
+| `target_classes` | array[string] | ❌ | `["cat"]` | 추적 대상 COCO 클래스 |
+| `interaction_classes` | array[string] | ❌ | 모든 감지 클래스 | 상호작용 대상 COCO 클래스 필터 |
+| `model_size` | string | ❌ | `"n"` | YOLO 모델 크기 (n/s/m/l/x) |
+| `model_path` | string | ❌ | — | 커스텀 모델 경로 (기본: yolo26{size}.pt) |
+| `quantize` | bool | ❌ | `false` | FP16 양자화 여부 |
+| `frame_skip` | int | ❌ | `0` | 추론 스킵 간격 (프레임 수) |
+| `llm_system_prompt` | string | ❌ | — | 카메라별 system prompt override |
 
 ### 4.2 source의 타입 구분 방식
 
@@ -145,26 +153,24 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 
 ---
 
-## 6. LLM 설정
+## 6. LLM 설정 (`llm:` 섹션)
 
-| 환경변수 | LLMConfig 필드 | 기본값 | 설명 |
-|---------|---------------|--------|------|
-| `API_BASE_URL` | `api_base_url` | `https://api.openai.com/v1` | API 엔드포인트 URL |
-| `LLM_KEY` | `api_key` | — | LLM API 키 |
-| `MODEL_NAME` | `model_name` | `gpt-4o-mini` | 사용할 모델 ID |
-| `VISION_ENABLED` | `vision_enabled` | `1` | Vision 이미지 첨부 활성화 |
-| `VISION_QUALITY` | `vision_quality` | `60` | 이미지 JPEG 품질 (1-100) |
-| `VISION_MAX_WIDTH` | `vision_max_width` | `1024` | 이미지 최대 너비 (px) |
-| `VISION_SNAPSHOT_COUNT` | `snapshot_count` | `5` | Vision 배치당 수집 이미지 수 |
-| `VISION_INTERVAL_SECONDS` | `snapshot_interval` | `30` | Vision 수집 간격 (초) |
-| `VISION_COLLECT_INTERVAL` | `collect_interval` | `0.5` | Batch collector capture 간격 (초) |
-| `VISION_COLLECT_COUNT` | `collect_count` | `5` | Per-camera buffer sliding window 크기 |
-| `VISION_MAX_STALE` | `max_stale_threshold` | `10.0` | Buffer entry staleness 한계 (초) |
-| `VISION_COOLDOWN_SECONDS` | `cooldown_seconds` | `30.0` | Vision logging 후 전체 cooldown (초) |
-| `VISION_EARLY_TRIGGER` | `early_trigger` | `5.0` | Cooldown offset: actual idle = cooldown - early_trigger |
+| 필드 | 기본값 | 설명 |
+|------|--------|------|
+| `api_base_url` | `https://api.openai.com/v1` | API 엔드포인트 URL |
+| `model_name` | `gpt-4o-mini` | 사용할 모델 ID |
+| `vision_enabled` | `true` | Vision 이미지 첨부 활성화 |
+| `vision_quality` | `60` | 이미지 JPEG 품질 (1-100) |
+| `vision_max_width` | `1024` | 이미지 최대 너비 (px) |
+| `collect_interval` | `0.5` | Batch collector capture 간격 (초) |
+| `collect_count` | `5` | Per-camera buffer maxlen |
+| `snapshot_interval` | `30.0` | Snapshot 최소 간격 (초, legacy) |
+| `snapshot_count` | `3` | Snapshot당 이미지 수 (legacy) |
+| `cooldown_seconds` | `30.0` | LLM 호출 cooldown (초) |
+| `early_trigger` | `5.0` | Cooldown offset |
+| `max_stale_threshold` | `10.0` | Buffer staleness 한계 (초, 미구현) |
 
-- `cooldown_seconds`는 `VISION_COOLDOWN_SECONDS`의 값이 사용됨 (기존 3.0s 하드코딩은 vision cooldown으로 대체됨)
-- 실행 모드(`MODE`)는 `os.environ` 직접 참조 — LLMConfig 필드 아님
+`api_key`는 환경변수 `LLM_KEY`로 설정 (YAML에 직접 저장 금지).
 
 ---
 
@@ -223,39 +229,44 @@ speed_slow ≤ 속도 < speed_fast → SLOW_MOVE
 
 ---
 
-## 9. 예시 — 완전한 spaces.yaml
+## 9. 예시
 
 ```yaml
-# === 공간 정의 ===
+mode: cv_pipeline  # 또는 llm_vision
+
 spaces:
   - id: room_living
     name: 거실
     cameras: [cam_01, cam_02]
-  - id: room_bedroom
-    name: 침실
-    cameras: [cam_03]
+    llm_system_prompt: "FALSE POSITIVE WARNINGS: ..."
 
-# === 카메라 정의 ===
 cameras:
   - id: cam_01
-    source: /dev/video0                  # 웹캠 (디바이스 경로)
-    status: active
-    target_classes: [cat, person]
-  - id: cam_02
-    source: rtsp://192.168.1.100/stream  # RTSP 스트림
+    source: /dev/video0
     status: active
     target_classes: [cat]
-  - id: cam_03
-    source: /home/user/videos/bedroom.mp4  # 오프라인 영상 파일
-    status: inactive                      # 비활성화 상태
-    target_classes: [cat, dog]
+    model_size: n
+    frame_skip: 15
 
-# === 임계값 ===
 thresholds:
-  overlap: 0.3          # bbox 겹침률 (IoU)
-  distance: 50          # 중심점 간 거리 (px)
-  speed_slow: 20        # 정지/천천히 이동 기준 (px/frame)
-  speed_fast: 40        # 천천히/빠르게 이동 기준 (px/frame)
+  overlap: 0.3
+  distance: 50
+  speed_slow: 20
+  speed_fast: 40
+  dash_threshold: 15.0
+  rotation_threshold: 45.0
+  hysteresis: 5.0
+
+llm:
+  api_base_url: http://10.0.0.106:8000/v1
+  model_name: Hana
+  vision_enabled: true
+  collect_interval: 0.5
+  collect_count: 5
+  cooldown_seconds: 30.0
+
+logging:
+  log_dir: logs
 ```
 
 
