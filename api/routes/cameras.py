@@ -91,7 +91,7 @@ async def create_camera(body: CameraCreate, _: str = Depends(verify_token)) -> C
     if orch:
         from core.config_manager import load_config, CameraConfig as CC
         new_cfg = load_config()
-        cam_obj = next((c for c in new_cfg.cameras if c.id == camera_id), None)
+        cam_obj = next((c for c in new_cfg.cameras if c.id == body.id), None)
         if cam_obj and cam_obj not in orch.app_config.cameras:
             orch.add_camera(cam_obj)
 

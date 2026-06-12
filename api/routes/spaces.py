@@ -100,8 +100,9 @@ async def delete_space(space_id: str, _: str = Depends(verify_token)) -> Dict[st
 
 @router.post("/{space_id}/flush")
 async def flush_space(space_id: str, _: str = Depends(verify_token)) -> Dict[str, Any]:
+    from api.server import _space_logger
     orch = _get_orchestrator()
-    if not orch or not orch.space_logger:
+    if not orch or not _space_logger:
         raise HTTPException(status_code=503, detail="Space logger not available")
 
     space = next((s for s in orch.spaces if s.id == space_id), None)
