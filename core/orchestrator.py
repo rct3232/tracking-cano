@@ -24,9 +24,8 @@ def _is_stream_source(source: str) -> bool:
 
 
 class _SimpleVisionDetector:
-    """Periodically checks each camera's latest image for target detection.
-    On target found, triggers space snapshot via orchestrator.
-    """
+    """Per-space independent detection threads. Each space runs its own round-robin loop concurrently."""
+
     def __init__(
         self,
         spaces: List[SpaceConfig],
@@ -38,7 +37,8 @@ class _SimpleVisionDetector:
         all_finished_check=None,
     ):
         self._stop_event = threading.Event()
-        self._spaces = {s.id: s for s in spaces}
+        self._spaces_lock = threading.Lock()
+        self._spaces: Dict[str, SpaceConfig] = {s.id: s for s in spaces}
         self._collectors = collectors
         self._space_logger = space_logger
         self._orchestrator = orchestrator
@@ -48,14 +48,20 @@ class _SimpleVisionDetector:
         self._detect_index: Dict[str, int] = {}  # space_id → next camera index
         for sid in self._spaces:
             self._detect_index[sid] = 0
-        self._thread = threading.Thread(target=self._run, daemon=True, name="vision-detector")
+        self._space_threads: Dict[str, threading.Thread] = {}
 
     def add_space(self, space: SpaceConfig):
-        self._spaces[space.id] = space
+        with self._spaces_lock:
+            self._spaces[space.id] = space
         self._detect_index[space.id] = 0
+        if not self._stop_event.is_set():
+            t = threading.Thread(target=self._run_space, args=(space.id,), daemon=True, name=f"detect-{space.id}")
+            t.start()
+            self._space_threads[space.id] = t
 
     def remove_space(self, space_id: str):
-        self._spaces.pop(space_id, None)
+        with self._spaces_lock:
+            self._spaces.pop(space_id, None)
         self._detect_index.pop(space_id, None)
 
     def remove_camera_from_space(self, space_id: str, cam_id: str):
@@ -69,76 +75,85 @@ class _SimpleVisionDetector:
             space.camera_ids.append(cam_id)
 
     def start(self):
-        self._thread.start()
-        logger.debug("[vision-detector] started with %d spaces", len(self._spaces))
+        for space_id in list(self._spaces.keys()):
+            t = threading.Thread(target=self._run_space, args=(space_id,), daemon=True, name=f"detect-{space_id}")
+            t.start()
+            self._space_threads[space_id] = t
+        logger.debug("[vision-detector] started with %d space threads", len(self._space_threads))
 
     def stop(self):
         self._stop_event.set()
-        self._thread.join(timeout=5)
+        for t in self._space_threads.values():
+            t.join(timeout=5)
+        self._space_threads.clear()
 
-    def _run(self):
+    def _run_space(self, space_id: str):
         while not self._stop_event.is_set():
             try:
                 if self._is_all_finished():
                     self._stop_event.wait(1.0)
                     continue
 
-                for space_id, space in self._spaces.items():
-                    if not space.camera_ids:
-                        continue
-                    idx = self._detect_index.get(space_id, 0)
-                    if idx >= len(space.camera_ids):
-                        self._detect_index[space_id] = 0
-                        continue
-                    cam_id = space.camera_ids[idx]
-                    collector = self._collectors.get(cam_id)
-                    if not collector or not collector.buffer:
-                        self._detect_index[space_id] = idx + 1
-                        break
-                    entry = collector.buffer[-1]
-                    age = time.monotonic() - entry.captured_at
-                    health = "healthy"
-                    if age > self._config.max_stale_threshold:
-                        health = "degraded"
-                    if health != "healthy":
-                        self._detect_index[space_id] = idx + 1
-                        break
+                with self._spaces_lock:
+                    space = self._spaces.get(space_id)
+                if not space or not space.camera_ids:
+                    self._stop_event.wait(1.0)
+                    continue
 
-                    # freeze: T0 시점 모든 카메라 buffer 복사
-                    frozen_buffers: Dict[str, List] = {}
-                    for cid in space.camera_ids:
-                        coll = self._collectors.get(cid)
-                        if coll and coll.buffer:
-                            frozen_buffers[cid] = list(coll.buffer)
+                idx = self._detect_index.get(space_id, 0)
+                if idx >= len(space.camera_ids):
+                    self._detect_index[space_id] = 0
+                    self._stop_event.wait(0.1)
+                    continue
 
-                    logger.debug("[vision-detector] cam=%s calling vision_detect", cam_id)
-                    result = self._space_logger.vision_detect(
-                        camera_id=cam_id,
-                        image_b64=entry.image_b64,
-                        llm_system_prompt=space.llm_system_prompt or None,
-                        target_classes=self._get_target_classes(space_id) or None,
-                    )
-                    if result is None:
-                        logger.debug("[vision-detector] cam=%s vision_detect returned None → skip", cam_id)
-                        self._detect_index[space_id] = idx + 1
-                        break
-
-                    if result.get("target_present", False):
-                        logger.info("[space:%s] cam=%s target_present=True → snapshot", space_id, cam_id)
-                        self._update_all_snapshots(space_id, frozen_buffers, detect_cam_id=cam_id, detect_entry=entry)
-                        detect_context = {
-                            "camera": cam_id,
-                            "reasoning": result.get("reasoning", ""),
-                        }
-                        self._orchestrator.request_space_snapshot(space_id, detect_context=detect_context)
-                        self._detect_index[space_id] = idx + 1
-                        continue
-
+                cam_id = space.camera_ids[idx]
+                collector = self._collectors.get(cam_id)
+                if not collector or not collector.buffer:
                     self._detect_index[space_id] = idx + 1
-                    break
-                self._stop_event.wait(0.1)
+                    self._stop_event.wait(0.5)
+                    continue
+
+                entry = collector.buffer[-1]
+                age = time.monotonic() - entry.captured_at
+                health = "healthy"
+                if age > self._config.max_stale_threshold:
+                    health = "degraded"
+                if health != "healthy":
+                    self._detect_index[space_id] = idx + 1
+                    self._stop_event.wait(0.5)
+                    continue
+
+                # freeze: T0 시점 모든 카메라 buffer 복사
+                frozen_buffers: Dict[str, List] = {}
+                for cid in space.camera_ids:
+                    coll = self._collectors.get(cid)
+                    if coll and coll.buffer:
+                        frozen_buffers[cid] = list(coll.buffer)
+
+                logger.debug("[vision-detector:%s] cam=%s calling vision_detect", space_id, cam_id)
+                result = self._space_logger.vision_detect(
+                    camera_id=cam_id,
+                    image_b64=entry.image_b64,
+                    llm_system_prompt=space.llm_system_prompt or None,
+                    target_classes=self._get_target_classes(space_id) or None,
+                )
+                if result is None:
+                    logger.debug("[vision-detector:%s] cam=%s vision_detect returned None → skip", space_id, cam_id)
+                    self._detect_index[space_id] = idx + 1
+                    continue
+
+                if result.get("target_present", False):
+                    logger.info("[space:%s] cam=%s target_present=True → snapshot", space_id, cam_id)
+                    self._update_all_snapshots(space_id, frozen_buffers, detect_cam_id=cam_id, detect_entry=entry)
+                    detect_context = {
+                        "camera": cam_id,
+                        "reasoning": result.get("reasoning", ""),
+                    }
+                    self._orchestrator.request_space_snapshot(space_id, detect_context=detect_context)
+
+                self._detect_index[space_id] = idx + 1
             except Exception:
-                logger.exception("[vision-detector] _run crashed")
+                logger.exception("[vision-detector:%s] _run_space crashed", space_id)
                 return
 
     def _get_target_classes(self, space_id: str) -> List[str]:

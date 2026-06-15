@@ -203,55 +203,35 @@ class SpaceLogger:
         if self.client is None:
             return None
 
-        # Stage 1: unbiased subject/object description (no target mention)
-        stage1_msg = [{"type": "text", "text": "Describe this room scene by listing all visible subjects and objects. Include furniture, electronics, decorations, toys, pillows, any people or animals, and any other items. For each entry, state its color and approximate location."}]
-        stage1_user = stage1_msg + [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-        ]
-        try:
-            r1 = self.client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[{"role": "user", "content": stage1_user}],
-                max_tokens=2048,
-            )
-            description = r1.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error("Vision detect stage 1 failed for %s: %s", camera_id, e)
-            return None
-
-        logger.info("[detect:%s] stage1 (%d chars): %s", camera_id, len(description), description[:2000])
-        try:
-            (Path("output") / f"stage1_{camera_id}.txt").write_text(description)
-        except Exception:
-            pass
-
-        # Stage 2: context-aware judgment with system prompt + response_format
-        combined_system = DETECT_SYSTEM_PROMPT
+        target_label = target_classes[0] if target_classes else "target"
+        # Single-stage: direct target detection
+        combined_system = DETECT_SYSTEM_PROMPT.format(target_label=target_label)
         if llm_system_prompt:
             combined_system = combined_system + "\n\n" + llm_system_prompt
-        stage2_messages = [{"role": "system", "content": combined_system}]
-        stage2_messages.append({
+        messages = [{"role": "system", "content": combined_system}]
+        messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Image description:\n{description}\n\nBased on the image and description above, is there a cat present? Answer in JSON only: {{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
+                {"type": "text", "text": f"Look at this image carefully. Is there a {target_label} present in this scene? If you see one, report it even if it is small or partially hidden.\n\nAnswer in JSON only:\n{{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
             ],
         })
         try:
-            r2 = self.client.chat.completions.create(
+            r = self.client.chat.completions.create(
                 model=self.config.model_name,
-                messages=stage2_messages,
+                messages=messages,
                 response_format={"type": "json_object"},
                 max_tokens=512,
             )
-            text = r2.choices[0].message.content.strip()
+            text = r.choices[0].message.content.strip()
         except Exception as e:
-            logger.error("Vision detect stage 2 failed for %s: %s", camera_id, e)
+            logger.error("Vision detect failed for %s: %s", camera_id, e)
             return None
 
+        logger.debug("[detect:%s] raw (%d chars): %s", camera_id, len(text), text[:500])
         parsed = self._parse_json_response(text, f"detect_{camera_id}")
         if not parsed:
-            logger.debug("[detect:%s] stage2 parse failed, raw: %s", camera_id, text[:200])
+            logger.debug("[detect:%s] parse failed, raw: %s", camera_id, text[:200])
             return None
 
         target_present = parsed.get("target_present", False)
@@ -382,7 +362,11 @@ class SpaceLogger:
                     merged_present = False
                 elif isinstance(cam_resp, dict):
                     desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
-                    coord = cam_resp.get("target_coordinate") or snap.target_coordinate
+                    raw_coord = cam_resp.get("target_coordinate")
+                    if raw_coord and len(raw_coord) == 4:
+                        coord = [raw_coord[1], raw_coord[0], raw_coord[3], raw_coord[2]]
+                    else:
+                        coord = snap.target_coordinate
                     merged_present = cam_resp.get("target_present", False)
                 else:
                     desc = f"target={snap.target_present}"
@@ -396,7 +380,7 @@ class SpaceLogger:
             per_camera_present.append(merged_present)
 
             if snap.image_b64 or snap.images:
-                img_to_save = snap.image_b64 or snap.images[0]
+                img_to_save = snap.images[-1] if snap.images else snap.image_b64
                 self._save_snapshot_image(img_to_save, space_name, cam_id, timestamp, coord)
 
             self._db_insert(
@@ -479,7 +463,7 @@ class SpaceLogger:
             reasoning_parts.append(f"{cam_id}: {desc}")
 
             if snap.image_b64 or snap.images:
-                img_to_save = snap.image_b64 or snap.images[0]
+                img_to_save = snap.images[-1] if snap.images else snap.image_b64
                 self._save_snapshot_image(img_to_save, space_name or space_id, cam_id, timestamp, coord)
 
             self._db_insert(
