@@ -60,6 +60,13 @@ api:
 #     interaction_classes: [couch, chair, bed]
 #     llm_system_prompt: "..."
 
+# === MinIO 스토리지 (선택) ===
+# 환경변수만 지원. YAML에서 설정 불가.
+# MINIO_ENDPOINT=minio.local:9000
+# MINIO_ACCESS_KEY=myaccesskey
+# MINIO_SECRET_KEY=mysecretkey123
+# MINIO_BUCKET=snapshots  # 기본값
+
 # === 공간 정의 ===
 # spaces:
 #   - id: room_livingroom

@@ -85,7 +85,7 @@ def _state_to_movement(state, direction: str) -> str:
 
 
 class SpaceLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs", repo=None, event_bus=None):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", repo=None, event_bus=None, minio_config=None):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +94,16 @@ class SpaceLogger:
         self.debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
         self.client: Optional[OpenAI] = None
         self._lock = threading.Lock()
+        self._minio = None
+        self._minio_config = minio_config
+        if minio_config and minio_config.is_configured:
+            from minio import Minio
+            self._minio = Minio(
+                minio_config.endpoint,
+                access_key=minio_config.access_key,
+                secret_key=minio_config.secret_key,
+                secure=True,
+            )
 
     def _ensure_client(self):
         if self.client is None:
@@ -164,17 +174,26 @@ class SpaceLogger:
                     return parsed
             except (json.JSONDecodeError, TypeError):
                 continue
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if m:
-            extracted = m.group(0)
-            for cleaned in [extracted, re.sub(r',\s*}', '}', extracted), re.sub(r',\s*\]', ']', extracted)]:
-                try:
-                    parsed = json.loads(cleaned)
-                    if isinstance(parsed, dict):
-                        logger.warning("[parse_json] Recovered via regex extraction. context=%s", context or "unknown")
-                        return parsed
-                except (json.JSONDecodeError, TypeError):
-                    continue
+        start = text.find('{')
+        if start >= 0:
+            depth = 0
+            for i in range(start, len(text)):
+                ch = text[i]
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        extracted = text[start:i+1]
+                        for cleaned in [extracted, re.sub(r',\s*}', '}', extracted), re.sub(r',\s*\]', ']', extracted)]:
+                            try:
+                                parsed = json.loads(cleaned)
+                                if isinstance(parsed, dict):
+                                    logger.warning("[parse_json] Recovered via brace balance. context=%s", context or "unknown")
+                                    return parsed
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                        break
         logger.warning("[parse_json] Failed to parse LLM output as JSON. context=%s, text=%r", context or "unknown", text[:500])
         return None
 
@@ -184,40 +203,55 @@ class SpaceLogger:
         if self.client is None:
             return None
 
-        timestamp = datetime.now(timezone.utc).isoformat()
-        context = [f"Timestamp: {timestamp}", f"Camera: {camera_id}"]
-        if target_classes:
-            context.append(f"Target objects: {', '.join(target_classes)}")
-        context.append("\nDetermine if any target object is present in this single image.")
-        context_prompt = "\n".join(context)
-
-        user_messages = [
-            {"type": "text", "text": context_prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+        # Stage 1: unbiased subject/object description (no target mention)
+        stage1_msg = [{"type": "text", "text": "Describe this room scene by listing all visible subjects and objects. Include furniture, electronics, decorations, toys, pillows, any people or animals, and any other items. For each entry, state its color and approximate location."}]
+        stage1_user = stage1_msg + [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
         ]
-
-        parts = [DETECT_SYSTEM_PROMPT]
-        if llm_system_prompt:
-            parts.append(f"Additional instructions:\n{llm_system_prompt}")
-
         try:
-            response = self.client.chat.completions.create(
+            r1 = self.client.chat.completions.create(
                 model=self.config.model_name,
-                messages=[
-                    {"role": "system", "content": "\n".join(parts)},
-                    {"role": "user", "content": user_messages},
-                ],
-                max_tokens=200,
-                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": stage1_user}],
+                max_tokens=2048,
             )
-            text = response.choices[0].message.content.strip()
+            description = r1.choices[0].message.content.strip()
         except Exception as e:
-            logger.error("Vision detect LLM call failed for %s: %s", camera_id, e)
+            logger.error("Vision detect stage 1 failed for %s: %s", camera_id, e)
+            return None
+
+        logger.info("[detect:%s] stage1 (%d chars): %s", camera_id, len(description), description[:2000])
+        try:
+            (Path("output") / f"stage1_{camera_id}.txt").write_text(description)
+        except Exception:
+            pass
+
+        # Stage 2: context-aware judgment with system prompt + response_format
+        combined_system = DETECT_SYSTEM_PROMPT
+        if llm_system_prompt:
+            combined_system = combined_system + "\n\n" + llm_system_prompt
+        stage2_messages = [{"role": "system", "content": combined_system}]
+        stage2_messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Image description:\n{description}\n\nBased on the image and description above, is there a cat present? Answer in JSON only: {{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+            ],
+        })
+        try:
+            r2 = self.client.chat.completions.create(
+                model=self.config.model_name,
+                messages=stage2_messages,
+                response_format={"type": "json_object"},
+                max_tokens=512,
+            )
+            text = r2.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error("Vision detect stage 2 failed for %s: %s", camera_id, e)
             return None
 
         parsed = self._parse_json_response(text, f"detect_{camera_id}")
         if not parsed:
-            logger.debug("[detect:%s] parse failed, raw: %s", camera_id, text[:200])
+            logger.debug("[detect:%s] stage2 parse failed, raw: %s", camera_id, text[:200])
             return None
 
         target_present = parsed.get("target_present", False)
@@ -225,14 +259,15 @@ class SpaceLogger:
         if target_present:
             logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning)
         else:
-            logger.debug("[detect:%s] target_present=False reason=%s", camera_id, reasoning)
+            logger.info("[detect:%s] target_present=False reason=%s", camera_id, reasoning)
         return parsed
 
     def space_snapshot(self, space_id: str, space_name: str,
                        snapshots: Dict[str, CameraSnapshot],
                        vision_enabled: bool,
                        target_classes: List[str] | None = None,
-                       llm_system_prompt: str | None = None) -> Optional[str]:
+                       llm_system_prompt: str | None = None,
+                       detect_context=None) -> Optional[str]:
         timestamp = datetime.now(timezone.utc).isoformat()
         batch_id = uuid4().hex
         self._ensure_client()
@@ -243,6 +278,10 @@ class SpaceLogger:
         user_messages = []
         if vision_enabled:
             user_messages.append({"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"})
+            if detect_context:
+                context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
+                               f"Reasoning: {detect_context['reasoning']}. Examine that camera's sequence first.")
+                user_messages.append({"type": "text", "text": context_str})
             for cam_id in sorted(snapshots.keys()):
                 snap = snapshots[cam_id]
                 user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---"})
@@ -250,12 +289,12 @@ class SpaceLogger:
                     for img_b64 in snap.images:
                         user_messages.append({
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
                         })
                 elif snap.image_b64:
                     user_messages.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{snap.image_b64}"}
+                        "image_url": {"url": f"data:image/png;base64,{snap.image_b64}"}
                     })
                 tracking_str = self._build_tracking_summary(snap.tracked_list, snap.interactions)
                 if tracking_str:
@@ -297,20 +336,11 @@ class SpaceLogger:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_messages},
                 ],
-                "max_tokens": 500,
+                "response_format": {"type": "json_object"},
+                "max_tokens": 2048,
             }
-            try:
-                kw_with_format = dict(response_kwargs)
-                kw_with_format["response_format"] = {"type": "json_object"}
-                response = self.client.chat.completions.create(**kw_with_format)
-                text = response.choices[0].message.content.strip()
-            except Exception as e:
-                if "'response_format'" in str(e):
-                    logger.warning("Model does not support json_object, falling back to text-only")
-                    response = self.client.chat.completions.create(**response_kwargs)
-                    text = response.choices[0].message.content.strip()
-                else:
-                    raise
+            response = self.client.chat.completions.create(**response_kwargs)
+            text = response.choices[0].message.content.strip()
         except Exception as e:
             logger.error("Snapshot LLM API call failed for %s: %s", space_id, e)
             return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id)
@@ -322,24 +352,47 @@ class SpaceLogger:
 
         cameras_resp = parsed.get("cameras", {})
         reasoning = parsed.get("reasoning", "")
+        if not reasoning and isinstance(cameras_resp, dict):
+            for v in cameras_resp.values():
+                if isinstance(v, str):
+                    reasoning = v
+                    break
+
+        top_level_present = parsed.get("target_present", False)
+        if not top_level_present:
+            logger.info("[snapshot:%s] top-level false, suppressed", space_id)
+            return None
+
+        if cameras_resp:
+            has_any_true = any(
+                isinstance(v, dict) and v.get("target_present", False)
+                for v in cameras_resp.values()
+            )
+            if not has_any_true:
+                logger.info("[snapshot:%s] all per-camera false, overridden to false", space_id)
+                return None
 
         per_camera_present: List[bool] = []
         for cam_id, snap in snapshots.items():
-            cam_resp = cameras_resp.get(cam_id, {})
-            if isinstance(cam_resp, str):
-                desc = cam_resp
-                coord = None
-                llm_present = False
-            elif isinstance(cam_resp, dict):
-                desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
-                coord = cam_resp.get("target_coordinate") or snap.target_coordinate
-                llm_present = cam_resp.get("target_present", False)
+            if cam_id in cameras_resp:
+                cam_resp = cameras_resp[cam_id]
+                if isinstance(cam_resp, str):
+                    desc = cam_resp
+                    coord = None
+                    merged_present = False
+                elif isinstance(cam_resp, dict):
+                    desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
+                    coord = cam_resp.get("target_coordinate") or snap.target_coordinate
+                    merged_present = cam_resp.get("target_present", False)
+                else:
+                    desc = f"target={snap.target_present}"
+                    coord = snap.target_coordinate
+                    merged_present = False
             else:
-                desc = f"target={snap.target_present}"
+                desc = None
                 coord = snap.target_coordinate
-                llm_present = False
+                merged_present = False
 
-            merged_present = snap.target_present or llm_present
             per_camera_present.append(merged_present)
 
             if snap.image_b64 or snap.images:
@@ -390,16 +443,24 @@ class SpaceLogger:
         return " | ".join(parts)
 
     def _save_snapshot_image(self, image_b64: str, space_name: str,
-                             cam_id: str, timestamp: str, coord: Optional[List[float]] = None):
+                              cam_id: str, timestamp: str, coord: Optional[List[float]] = None):
         try:
             capture_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
             filename = f"{space_name}_{cam_id}_{capture_ts}.jpg"
             img_data = image_b64
             if coord:
                 img_data = draw_normalized_bbox(image_b64, coord, label=space_name)
-            output_dir = Path("output")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / filename).write_bytes(base64.b64decode(img_data))
+            img_bytes = base64.b64decode(img_data)
+
+            if self._minio:
+                from io import BytesIO
+                self._minio.put_object(
+                    self._minio_config.bucket, filename, BytesIO(img_bytes), len(img_bytes), "image/jpeg"
+                )
+            else:
+                output_dir = Path("output")
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / filename).write_bytes(img_bytes)
         except Exception as e:
             logger.error("Failed to save snapshot image %s: %s", filename, e)
 

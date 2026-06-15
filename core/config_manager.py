@@ -11,6 +11,34 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileModifie
 
 from settings import LLMConfig, LogConfig, Thresholds, YOLOConfig
 
+# ── DB Loading ───────────────────────────────────────────────────────
+
+def load_from_db(repo, llm_key: str = "") -> "AppConfig":
+    """DB에서 설정 로드 → AppConfig 반환."""
+    raw = repo.get_full_config()
+
+    thresholds = Thresholds.from_dict(raw["thresholds"])
+    yolo = YOLOConfig.from_dict(raw["yolo"])
+    llm = LLMConfig.from_dict(raw["llm"])
+    # 12-factor: env override for secrets
+    if llm_key:
+        llm.api_key = llm_key
+    db_url = os.environ.get("DATABASE_URL", "")
+    log = LogConfig(db_url=db_url)
+
+    mode = raw.get("mode", "cv_pipeline") or "cv_pipeline"
+
+    cameras = [CameraConfig(c) for c in raw["cameras"]]
+    spaces = [SpaceConfig(s) for s in raw["spaces"]]
+
+    logger.info(
+        "Config loaded from DB: %d cameras, %d spaces, mode=%s",
+        len(cameras),
+        len(spaces),
+        mode,
+    )
+    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode)
+
 logger = logging.getLogger(__name__)
 
 # ── Data structures ────────────────────────────────────────────────

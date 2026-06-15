@@ -83,7 +83,7 @@ class _BatchCollector:
         logger.info("Batch collector %s stopped", self.camera_id)
 
     def _encode_frame(self, frame, captured_at: float):
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.vision_quality])
+        _, buf = cv2.imencode(".png", frame)
         image_b64 = base64.b64encode(buf).decode("utf-8")
         entry = _FrameEntry(image_b64, captured_at)
         self.buffer.append(entry)
@@ -147,6 +147,14 @@ class _BatchCollector:
             self._start_event.wait()
 
         cap = create_capture(self.source)
+        if cap is None and self._is_stream:
+            for attempt in range(1, 4):
+                logger.warning("[%s] Cannot open camera (attempt %d/3)", self.camera_id, attempt + 1)
+                time.sleep(2)
+                cap = create_capture(self.source)
+                if cap is not None:
+                    break
+
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
             self._finished = True
@@ -265,6 +273,14 @@ class _VisionOnlyWorker:
 
     def _run(self):
         cap = create_capture(self.source)
+        if cap is None and self._is_stream:
+            for attempt in range(1, 4):
+                logger.warning("[%s] Cannot open camera (attempt %d/3)", self.camera_id, attempt + 1)
+                time.sleep(2)
+                cap = create_capture(self.source)
+                if cap is not None:
+                    break
+
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
             self._finished = True
@@ -319,7 +335,7 @@ class _VisionOnlyWorker:
                     frame_id += 1
                     continue
 
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.vision_quality])
+                _, buf = cv2.imencode(".png", frame)
                 image_b64 = base64.b64encode(buf).decode("utf-8")
 
                 buffer.append(image_b64)

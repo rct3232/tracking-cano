@@ -65,10 +65,14 @@ def draw_normalized_bbox(
     if img is None:
         return image_b64
     h, w = img.shape[:2]
-    x1 = int(max(0.0, min(1.0, coords[0])) * w)
-    y1 = int(max(0.0, min(1.0, coords[1])) * h)
-    x2 = int(max(0.0, min(1.0, coords[2])) * w)
-    y2 = int(max(0.0, min(1.0, coords[3])) * h)
+    # Support both pixel coords and normalized coords
+    if any(v > 1.0 for v in coords):
+        x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+    else:
+        x1 = int(coords[0] * w)
+        y1 = int(coords[1] * h)
+        x2 = int(coords[2] * w)
+        y2 = int(coords[3] * h)
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
     if label:
         font_scale = 0.5

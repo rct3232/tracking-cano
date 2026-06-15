@@ -12,9 +12,11 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
+from sqlalchemy import text
 
-from settings import PipelineConfig, YOLOConfig
-from core.config_manager import ConfigWatcher, load_config
+from settings import MinIOConfig, PipelineConfig, YOLOConfig
+from core.config_applier import apply_config_changes
+from core.config_manager import AppConfig, ConfigWatcher, load_config, load_from_db
 from core.pipeline import Pipeline
 from core.orchestrator import Orchestrator
 from nlp.logger import SpaceLogger
@@ -138,22 +140,30 @@ def run_video(config: PipelineConfig, video_path: str, repo: LogRepository | Non
         cap.release()
 
 
-def run_multi(config_path: str, model_path: str | None = None, repo: LogRepository | None = None):
-    from core.config_manager import load_config
+def run_multi(config_path: str, model_path: str | None = None, repo: LogRepository | None = None, app_config: AppConfig | None = None, config_repo=None):
     from api.event_bus import EventBus
     from api.server import start_api
 
-    app_config = load_config(config_path)
     event_bus = EventBus()
+    minio_cfg = MinIOConfig.from_env()
+    space_logger = SpaceLogger(app_config.llm, repo=repo, event_bus=event_bus, minio_config=minio_cfg)
+    orchestrator = Orchestrator(
+        app_config, space_logger, default_model_path=model_path, repo=repo, event_bus=event_bus
+    )
+    orchestrator._config_repo = config_repo
 
-    space_logger = SpaceLogger(app_config.llm, repo=repo, event_bus=event_bus)
-    orchestrator = Orchestrator(app_config, space_logger, default_model_path=model_path, repo=repo, event_bus=event_bus)
-
-    # Start REST API server in daemon thread
     start_api(orchestrator=orchestrator, space_logger=space_logger, repo=repo, event_bus=event_bus)
     orchestrator.start()
-    watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
-    watcher.start()
+
+    if config_repo is not None:
+        from core.config_listener import ConfigListener
+        listener = ConfigListener(config_repo, orchestrator, space_logger, os.environ.get("DATABASE_URL", ""))
+        listener.start()
+        config_watcher_stop = lambda: listener.stop()
+    else:
+        watcher = ConfigWatcher(config_path, lambda new_cfg, diff: _on_config_change(orchestrator, space_logger, new_cfg, diff))
+        watcher.start()
+        config_watcher_stop = lambda: watcher.stop()
 
     all_finished_since: float | None = None
     try:
@@ -169,36 +179,12 @@ def run_multi(config_path: str, model_path: str | None = None, repo: LogReposito
             all_finished_since = None
             time.sleep(1)
     finally:
-        watcher.stop()
+        config_watcher_stop()
         orchestrator.stop()
 
 
 def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new_config, diff):
-    orchestrator.update_config(new_config)
-
-    for cam_id, (old_space, new_space) in diff.reassigned_cameras.items():
-        logger.info("Camera %s reassigned: %s → %s", cam_id, old_space, new_space)
-        orchestrator.reassign_camera(cam_id, old_space, new_space)
-        if orchestrator._vision_detector:
-            if old_space:
-                orchestrator._vision_detector.remove_camera_from_space(old_space, cam_id)
-            if new_space:
-                orchestrator._vision_detector.add_camera_to_space(new_space, cam_id)
-    for cam_id in diff.added_cameras:
-        cam = next((c for c in new_config.cameras if c.id == cam_id), None)
-        if cam:
-            orchestrator.add_camera(cam)
-    for cam_id in diff.removed_cameras:
-        orchestrator.remove_camera(cam_id)
-    for space_id in diff.added_spaces:
-        space = next((s for s in new_config.spaces if s.id == space_id), None)
-        if space:
-            logger.info("Space added: %s (cameras: %d)", space_id, len(space.camera_ids))
-            if orchestrator._vision_detector:
-                orchestrator._vision_detector.add_space(space)
-    for space_id in diff.removed_spaces:
-        if orchestrator._vision_detector:
-            orchestrator._vision_detector.remove_space(space_id)
+    apply_config_changes(orchestrator, space_logger, new_config)
 
 
 def main():
@@ -216,21 +202,42 @@ def main():
     if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
         logging.getLogger().setLevel(logging.DEBUG)
 
-    app_config = load_config(args.config)
+    db_url = os.environ.get("DATABASE_URL", "")
+    is_postgres = db_url.startswith("postgresql://")
+
+    if is_postgres:
+        engine, Session = init_db(db_url)
+        if not engine:
+            logger.error("DB connection failed, aborting")
+            sys.exit(1)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except Exception as e:
+            logger.error("DB connection check failed: %s", e)
+            sys.exit(1)
+
+        from storage.config_repository import ConfigRepository
+        config_repo = ConfigRepository(Session, db_url)
+        app_config = load_from_db(config_repo, llm_key=os.environ.get("LLM_KEY", ""))
+        repo = LogRepository(Session) if Session else None
+    else:
+        app_config = load_config(args.config)
+        config_repo = None
+        engine, Session = init_db(app_config.log.db_url)
+        repo = LogRepository(Session) if Session else None
+
     log_config = app_config.log
     setup_logging(log_config.log_dir)
-
     logger.info("Running in mode: %s", app_config.mode)
 
-    engine, Session = init_db(log_config.db_url)
-    repo = LogRepository(Session) if Session else None
     if repo:
         logger.info("Log DB: %s", log_config.db_url)
     else:
         logger.warning("No DB available — log entries will not be persisted")
 
     if args.live == "":
-        run_multi(args.config, model_path=args.model, repo=repo)
+        run_multi(args.config, model_path=args.model, repo=repo, app_config=app_config, config_repo=config_repo)
     elif args.live:
         target_classes = args.target_classes or ["cat"]
         config = PipelineConfig(

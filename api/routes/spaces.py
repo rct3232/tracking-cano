@@ -1,4 +1,4 @@
-"""Space CRUD endpoints — modifies configuration.yaml and triggers hot-reload."""
+"""Space CRUD endpoints — modifies configuration.yaml (dev) or DB (production)."""
 
 from typing import Any, Dict, List, Optional
 
@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.auth import verify_token
 from api.models import SpaceCreate, SpaceResponse, SpaceUpdate
+from core.config_applier import apply_config_changes
 from core.yaml_writer import (
     read_yaml,
     remove_yaml_space,
@@ -18,6 +19,13 @@ router = APIRouter()
 def _get_orchestrator():
     from api.server import _orchestrator as o
     return o
+
+
+def _is_db_mode():
+    orch = _get_orchestrator()
+    if orch is None:
+        return False
+    return getattr(orch, "_config_repo", None) is not None
 
 
 @router.get("/", response_model=List[SpaceResponse])
@@ -67,7 +75,23 @@ async def get_space(space_id: str, _: str = Depends(verify_token)) -> SpaceRespo
 @router.post("/", response_model=SpaceResponse)
 async def create_space(body: SpaceCreate, _: str = Depends(verify_token)) -> SpaceResponse:
     space_dict = body.model_dump(exclude_none=True)
-    update_yaml_space(space_dict)
+
+    if _is_db_mode():
+        orch = _get_orchestrator()
+        repo = orch._config_repo
+        data = {
+            "id": body.id,
+            "name": body.name or body.id,
+            "cameras": body.cameras or [],
+            "llm_system_prompt": getattr(body, "llm_system_prompt", None),
+        }
+        repo.save_space(body.id, data)
+        from core.config_manager import load_from_db
+        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
+        apply_config_changes(orch, orch.space_logger, new_cfg)
+    else:
+        update_yaml_space(space_dict)
+
     return SpaceResponse(**space_dict, state=None)
 
 
@@ -77,24 +101,60 @@ async def update_space(
     body: SpaceUpdate,
     _: str = Depends(verify_token),
 ) -> SpaceResponse:
-    data = read_yaml()
-    spaces_raw = data.get("spaces", [])
-    sp_dict = next((s for s in spaces_raw if isinstance(s, dict) and s["id"] == space_id), None)
-    if not sp_dict:
-        raise HTTPException(status_code=404, detail=f"Space {space_id} not found")
+    orch = _get_orchestrator()
 
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
+    if _is_db_mode():
+        # Read current from orchestrator config
+        space = next((s for s in orch.spaces if s.id == space_id), None)
+        if not space:
+            raise HTTPException(status_code=404, detail=f"Space {space_id} not found")
+
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            return SpaceResponse(
+                id=space.id, name=space.name, cameras=space.camera_ids, state=None,
+            )
+
+        sp_dict = {
+            "id": space_id,
+            "name": space.name,
+            "cameras": space.camera_ids,
+            "llm_system_prompt": getattr(space, "llm_system_prompt", None),
+        }
+        sp_dict.update(updates)
+
+        repo = orch._config_repo
+        repo.save_space(space_id, sp_dict)
+        from core.config_manager import load_from_db
+        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
+        apply_config_changes(orch, orch.space_logger, new_cfg)
+
         return SpaceResponse(**sp_dict, state=None)
+    else:
+        data = read_yaml()
+        spaces_raw = data.get("spaces", [])
+        sp_dict = next((s for s in spaces_raw if isinstance(s, dict) and s["id"] == space_id), None)
+        if not sp_dict:
+            raise HTTPException(status_code=404, detail=f"Space {space_id} not found")
 
-    sp_dict.update(updates)
-    update_yaml_space(sp_dict)
-    return SpaceResponse(**sp_dict, state=None)
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            return SpaceResponse(**sp_dict, state=None)
+
+        sp_dict.update(updates)
+        update_yaml_space(sp_dict)
+        return SpaceResponse(**sp_dict, state=None)
 
 
 @router.delete("/{space_id}")
 async def delete_space(space_id: str, _: str = Depends(verify_token)) -> Dict[str, str]:
-    remove_yaml_space(space_id)
+    if _is_db_mode():
+        orch = _get_orchestrator()
+        repo = orch._config_repo
+        repo.remove_space(space_id)
+    else:
+        remove_yaml_space(space_id)
+
     return {"status": "deleted", "space_id": space_id}
 
 

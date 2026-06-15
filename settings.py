@@ -72,6 +72,28 @@ class LogConfig:
 
 
 @dataclass
+class MinIOConfig:
+    endpoint: str = ""
+    access_key: str = ""
+    secret_key: str = ""
+    bucket: str = "snapshots"
+
+    @classmethod
+    def from_env(cls) -> 'MinIOConfig':
+        import os
+        return cls(
+            endpoint=os.environ.get("MINIO_ENDPOINT", ""),
+            access_key=os.environ.get("MINIO_ACCESS_KEY", ""),
+            secret_key=os.environ.get("MINIO_SECRET_KEY", ""),
+            bucket=os.environ.get("MINIO_BUCKET", "snapshots"),
+        )
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.endpoint and self.access_key and self.secret_key)
+
+
+@dataclass
 class PipelineConfig:
     target_classes: List[str] = field(default_factory=lambda: ["cat"])
     interaction_classes: Optional[List[str]] = None

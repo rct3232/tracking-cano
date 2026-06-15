@@ -1,4 +1,4 @@
-"""Camera CRUD endpoints — modifies configuration.yaml and triggers hot-reload."""
+"""Camera CRUD endpoints — modifies configuration.yaml (dev) or DB (production)."""
 
 from typing import Dict, List, Optional
 
@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.auth import verify_token
 from api.models import CameraCreate, CameraResponse, CameraUpdate
+from core.config_applier import apply_config_changes
 from core.yaml_writer import (
     read_yaml,
     remove_yaml_camera,
@@ -20,24 +21,28 @@ def _get_orchestrator():
     return o
 
 
+def _is_db_mode():
+    orch = _get_orchestrator()
+    if orch is None:
+        return False
+    return getattr(orch, "_config_repo", None) is not None
+
+
 @router.get("/", response_model=List[CameraResponse])
 async def list_cameras(_: str = Depends(verify_token)) -> List[CameraResponse]:
     orch = _get_orchestrator()
     if orch is None:
-        # Fallback: read from YAML only
         data = read_yaml()
         cameras_raw = data.get("cameras", [])
         return [CameraResponse(**c) for c in cameras_raw]
 
     resp = []
     for cam in orch.app_config.cameras:
-        worker_state = None
+        worker_state = "stopped"
         if cam.id in orch._workers:
             worker_state = "running"
         elif cam.id in orch._collectors:
             worker_state = "collector"
-        else:
-            worker_state = "stopped"
 
         resp.append(CameraResponse(
             id=cam.id,
@@ -83,19 +88,17 @@ async def get_camera(camera_id: str, _: str = Depends(verify_token)) -> CameraRe
 @router.post("/", response_model=CameraResponse)
 async def create_camera(body: CameraCreate, _: str = Depends(verify_token)) -> CameraResponse:
     orch = _get_orchestrator()
-
-    # Write to YAML (triggers watchdog hot-reload)
     camera_dict = body.model_dump(exclude_none=True)
-    update_yaml_camera(camera_dict)
 
-    if orch:
-        from core.config_manager import load_config, CameraConfig as CC
-        new_cfg = load_config()
-        cam_obj = next((c for c in new_cfg.cameras if c.id == body.id), None)
-        if cam_obj and cam_obj not in orch.app_config.cameras:
-            orch.add_camera(cam_obj)
+    if _is_db_mode():
+        repo = orch._config_repo
+        repo.save_camera(body.id, camera_dict)
+        from core.config_manager import load_from_db
+        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
+        apply_config_changes(orch, orch.space_logger, new_cfg)
+    else:
+        update_yaml_camera(camera_dict)
 
-    # Return the created camera
     return CameraResponse(**camera_dict, worker_state="pending")
 
 
@@ -107,31 +110,55 @@ async def update_camera(
 ) -> CameraResponse:
     orch = _get_orchestrator()
 
-    # Read current camera from YAML
-    data = read_yaml()
-    cameras_raw = data.get("cameras", [])
-    cam_dict = next((c for c in cameras_raw if isinstance(c, dict) and c["id"] == camera_id), None)
-    if not cam_dict:
-        raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
+    if _is_db_mode():
+        # Read current from orchestrator config
+        cam = next((c for c in orch.app_config.cameras if c.id == camera_id), None)
+        if not cam:
+            raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
 
-    # Merge updates (only non-None fields)
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        return CameraResponse(**cam_dict, worker_state="unknown")
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            return CameraResponse(
+                id=cam.id, source=cam.source, status=cam.status,
+                target_classes=cam.target_classes, interaction_classes=cam.interaction_classes,
+                model_size=cam.model_size, frame_skip=cam.frame_skip, worker_state="unknown",
+            )
 
-    cam_dict.update(updates)
-    update_yaml_camera(cam_dict)
+        # Merge updates into camera dict
+        cam_dict = {
+            "id": cam.id, "source": cam.source, "status": cam.status,
+            "target_classes": cam.target_classes, "interaction_classes": cam.interaction_classes,
+            "model_size": cam.model_size, "frame_skip": cam.frame_skip,
+            "quantize": cam.quantize, "llm_system_prompt": cam.llm_system_prompt,
+        }
+        cam_dict.update(updates)
 
-    if orch:
-        # Restart the camera with new config
+        repo = orch._config_repo
+        repo.save_camera(camera_id, cam_dict)
+        from core.config_manager import load_from_db
+        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
+        apply_config_changes(orch, orch.space_logger, new_cfg)
+
+        return CameraResponse(**cam_dict, worker_state="restarting")
+    else:
+        data = read_yaml()
+        cameras_raw = data.get("cameras", [])
+        cam_dict = next((c for c in cameras_raw if isinstance(c, dict) and c["id"] == camera_id), None)
+        if not cam_dict:
+            raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
+
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            return CameraResponse(**cam_dict, worker_state="unknown")
+
+        cam_dict.update(updates)
+        update_yaml_camera(cam_dict)
+
         from core.config_manager import load_config
         new_cfg = load_config()
-        cam_obj = next((c for c in new_cfg.cameras if c.id == camera_id), None)
-        if cam_obj:
-            orch.remove_camera(camera_id)
-            orch.add_camera(cam_obj)
+        apply_config_changes(orch, orch.space_logger, new_cfg)
 
-    return CameraResponse(**cam_dict, worker_state="restarting")
+        return CameraResponse(**cam_dict, worker_state="restarting")
 
 
 @router.delete("/{camera_id}")
@@ -141,7 +168,12 @@ async def delete_camera(camera_id: str, _: str = Depends(verify_token)) -> Dict[
     if orch:
         orch.remove_camera(camera_id)
 
-    remove_yaml_camera(camera_id)
+    if _is_db_mode():
+        repo = orch._config_repo
+        repo.remove_camera(camera_id)
+    else:
+        remove_yaml_camera(camera_id)
+
     return {"status": "deleted", "camera_id": camera_id}
 
 

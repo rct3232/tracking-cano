@@ -126,8 +126,13 @@ class _SimpleVisionDetector:
                     if result.get("target_present", False):
                         logger.info("[space:%s] cam=%s target_present=True → snapshot", space_id, cam_id)
                         self._update_all_snapshots(space_id, frozen_buffers, detect_cam_id=cam_id, detect_entry=entry)
-                        self._orchestrator.request_space_snapshot(space_id)
-                        return
+                        detect_context = {
+                            "camera": cam_id,
+                            "reasoning": result.get("reasoning", ""),
+                        }
+                        self._orchestrator.request_space_snapshot(space_id, detect_context=detect_context)
+                        self._detect_index[space_id] = idx + 1
+                        continue
 
                     self._detect_index[space_id] = idx + 1
                     break
@@ -210,7 +215,7 @@ class _CameraWorker:
             scale = self._vision_max_width / w
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
         import base64 as _b64
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self._vision_quality])
+        _, buf = cv2.imencode(".png", frame)
         raw_b64 = _b64.b64encode(buf).decode("utf-8")
         if target_coordinate:
             from utils.image import draw_normalized_bbox
@@ -387,7 +392,7 @@ class Orchestrator:
         with self._snapshot_lock:
             self._snapshots[camera_id] = snapshot
 
-    def request_space_snapshot(self, space_id: str):
+    def request_space_snapshot(self, space_id: str, detect_context=None):
         if not self.space_logger:
             return
 
@@ -430,6 +435,7 @@ class Orchestrator:
             vision_enabled=self.app_config.llm.vision_enabled,
             target_classes=target_classes or None,
             llm_system_prompt=space_obj.llm_system_prompt if space_obj else None,
+            detect_context=detect_context,
         )
 
     def update_config(self, new_config: AppConfig):
@@ -484,6 +490,14 @@ class Orchestrator:
         if mode == "llm_vision":
             from core.vision_worker import _BatchCollector
             cap = create_capture(camera.source)
+            if cap is None and _is_stream_source(camera.source):
+                for attempt in range(1, 4):
+                    logger.warning("[%s] Cannot open camera (attempt %d/3)", camera.id, attempt + 1)
+                    time.sleep(2)
+                    cap = create_capture(camera.source)
+                    if cap is not None:
+                        break
+
             if cap is None:
                 logger.error("Cannot open camera %s from %s", camera.id, camera.source)
                 return
@@ -515,6 +529,14 @@ class Orchestrator:
             return
         else:
             cap = create_capture(camera.source)
+            if cap is None and _is_stream_source(camera.source):
+                for attempt in range(1, 4):
+                    logger.warning("[%s] Cannot open camera (attempt %d/3)", camera.id, attempt + 1)
+                    time.sleep(2)
+                    cap = create_capture(camera.source)
+                    if cap is not None:
+                        break
+
             if cap is None:
                 logger.error("Cannot open camera %s from %s", camera.id, camera.source)
                 return
