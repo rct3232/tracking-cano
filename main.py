@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 from sqlalchemy import text
 
-from settings import MinIOConfig, PipelineConfig, YOLOConfig
+from settings import MinIOConfig, PipelineConfig, ReconnectConfig, YOLOConfig
 from core.config_applier import apply_config_changes
 from core.config_manager import AppConfig, ConfigWatcher, load_config, load_from_db
 from core.pipeline import Pipeline
@@ -58,17 +58,32 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 
 def run_live(config: PipelineConfig, camera_source: str):
+    rc = ReconnectConfig()
+    backoff_delay = rc.base_delay
+
     cap = create_capture(camera_source)
+    is_stream = isinstance(camera_source, str) and camera_source.startswith(("rtsp://", "http://", "https://"))
+    while cap is None and is_stream:
+        logger.warning("Cannot open %s, retrying in %.1fs...", camera_source, backoff_delay)
+        time.sleep(backoff_delay)
+        try:
+            cap = create_capture(camera_source)
+        except Exception:
+            logger.exception("create_capture failed during initial connect")
+            cap = None
+        if cap is None:
+            backoff_delay = min(backoff_delay * 2, rc.max_delay)
+
     if cap is None:
         logger.error("Cannot open camera %s", camera_source)
         return
 
     cam_id = camera_source.split("/")[-1] if "/" in camera_source else camera_source
-    logger.info("Live mode started: %s (mode=%s)", camera_source, mode)
+    logger.info("Live mode started: %s (mode=%s)", camera_source, config.mode if hasattr(config, 'mode') else "cv_pipeline")
     pipeline = Pipeline(config, f"cam_{cam_id}")
     frame_id = 0
     consecutive_failures = 0
-    max_failures = 5
+    max_failures = rc.max_failures
 
     try:
         while _running:
@@ -77,21 +92,24 @@ def run_live(config: PipelineConfig, camera_source: str):
                 consecutive_failures += 1
                 logger.warning("Failed to read frame from %s (attempt %d/%d)", camera_source, consecutive_failures, max_failures)
                 if consecutive_failures >= max_failures:
-                    logger.warning("Reconnecting to %s...", camera_source)
+                    logger.warning("Reconnecting to %s... (backoff=%.1fs)", camera_source, backoff_delay)
                     cap.release()
-                    cap = create_capture(camera_source)
-                    if cap is None:
-                        logger.error("Cannot reconnect to %s, retrying in 5s...", camera_source)
-                        time.sleep(5)
+                    time.sleep(backoff_delay)
+                    try:
                         cap = create_capture(camera_source)
-                        if cap is None:
-                            logger.error("Still cannot reconnect to %s", camera_source)
-                            time.sleep(5)
-                            consecutive_failures = 0
-                            continue
+                    except Exception:
+                        logger.exception("create_capture failed during reconnect")
+                        cap = None
+                    if cap is None:
+                        logger.error("Cannot reconnect to %s", camera_source)
+                        time.sleep(rc.reconnect_backoff)
+                        backoff_delay = min(backoff_delay * 2, rc.max_delay)
+                        consecutive_failures = 0
+                        continue
                     consecutive_failures = 0
+                    backoff_delay = rc.base_delay
                 else:
-                    time.sleep(0.5)
+                    time.sleep(rc.read_backoff)
                 continue
 
             consecutive_failures = 0

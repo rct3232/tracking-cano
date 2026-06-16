@@ -53,6 +53,7 @@ class LLMConfig:
     max_stale_threshold: float = 10.0
     cooldown_seconds: float = 30.0
     early_trigger: float = 5.0
+    json_response_format: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LLMConfig':
@@ -91,6 +92,21 @@ class MinIOConfig:
     @property
     def is_configured(self) -> bool:
         return bool(self.endpoint and self.access_key and self.secret_key)
+
+
+@dataclass
+class ReconnectConfig:
+    max_failures: int = 5
+    base_delay: float = 1.0
+    max_delay: float = 300.0
+    read_backoff: float = 0.5
+    reconnect_backoff: float = 2.0
+    pts_lag_threshold: float = 60.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'ReconnectConfig':
+        valid = {k: v for k, v in d.items() if k in cls.__annotations__}
+        return cls(**valid)
 
 
 @dataclass

@@ -9,6 +9,7 @@ from typing import Callable
 
 import cv2
 
+from settings import ReconnectConfig
 from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class _BatchCollector:
         capture_start: float | None = None,
         loop_count: int = 1,
         barrier: threading.Barrier | None = None,
+        reconnect: ReconnectConfig | None = None,
     ):
         self.camera_id = camera_id
         self.source = source
@@ -70,6 +72,7 @@ class _BatchCollector:
         self._barrier = barrier
         self._is_stream = _is_stream_source(source)
         self._finished = False
+        self.reconnect = reconnect or ReconnectConfig()
         self.buffer: deque[_FrameEntry] = deque(maxlen=collect_count)
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"collect-{camera_id}")
 
@@ -147,13 +150,19 @@ class _BatchCollector:
             self._start_event.wait()
 
         cap = create_capture(self.source)
-        if cap is None and self._is_stream:
-            for attempt in range(1, 4):
-                logger.warning("[%s] Cannot open camera (attempt %d/3)", self.camera_id, attempt + 1)
-                time.sleep(2)
+        rc = self.reconnect
+        backoff_delay = rc.base_delay
+
+        while cap is None and self._is_stream:
+            logger.warning("[%s] Cannot open camera, retrying in %.1fs", self.camera_id, backoff_delay)
+            time.sleep(backoff_delay)
+            try:
                 cap = create_capture(self.source)
-                if cap is not None:
-                    break
+            except Exception:
+                logger.exception("[%s] create_capture failed during initial connect", self.camera_id)
+                cap = None
+            if cap is None:
+                backoff_delay = min(backoff_delay * 2, rc.max_delay)
 
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
@@ -175,7 +184,8 @@ class _BatchCollector:
 
         try:
             consecutive_failures = 0
-            max_failures = 5
+            max_failures = rc.max_failures
+            backoff_delay = rc.base_delay
 
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
@@ -183,22 +193,30 @@ class _BatchCollector:
                     consecutive_failures += 1
                     if consecutive_failures >= max_failures:
                         logger.warning(
-                            "Batch collector %s reconnecting... (%d failures)",
+                            "Batch collector %s reconnecting... (%d failures, backoff=%.1fs)",
                             self.camera_id,
                             consecutive_failures,
+                            backoff_delay,
                         )
                         cap.release()
-                        time.sleep(1)
-                        cap = create_capture(self.source)
-                        if cap is None:
+                        time.sleep(backoff_delay)
+                        try:
+                            new_cap = create_capture(self.source)
+                        except Exception:
+                            logger.exception("[%s] create_capture failed during reconnect", self.camera_id)
+                            new_cap = None
+                        if new_cap is None:
                             logger.error("Batch collector %s reconnect failed for %s", self.camera_id, self.source)
-                            time.sleep(2)
+                            time.sleep(rc.reconnect_backoff)
+                            backoff_delay = min(backoff_delay * 2, rc.max_delay)
                             continue
+                        cap = new_cap
                         self.buffer.clear()
                         consecutive_failures = 0
                         connect_wall = time.monotonic()
+                        backoff_delay = rc.base_delay
                     else:
-                        time.sleep(0.5)
+                        time.sleep(rc.read_backoff)
                     continue
 
                 consecutive_failures = 0
@@ -206,8 +224,8 @@ class _BatchCollector:
                 pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                 if pts_ms > 0:
                     lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
-                    if lag_ms > 60_000:
-                        logger.warning("[collect:%s] PTS lag=%.0fms > 60s, forcing reconnect", self.camera_id, lag_ms)
+                    if lag_ms > rc.pts_lag_threshold * 1000:
+                        logger.warning("[collect:%s] PTS lag=%.0fms > %.0fs, forcing reconnect", self.camera_id, lag_ms, rc.pts_lag_threshold)
                         consecutive_failures = max_failures
                         continue
                 now = time.monotonic()
@@ -245,6 +263,7 @@ class _VisionOnlyWorker:
         on_batch_ready: Callable | None = None,
         llm_system_prompt: str | None = None,
         target_classes: list | None = None,
+        reconnect: ReconnectConfig | None = None,
     ):
         self.camera_id = camera_id
         self.source = source
@@ -258,6 +277,7 @@ class _VisionOnlyWorker:
         self.target_classes = target_classes or []
         self._is_stream = _is_stream_source(source)
         self._finished = False
+        self.reconnect = reconnect or ReconnectConfig()
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"vis-{camera_id}")
 
     def start(self):
@@ -272,14 +292,20 @@ class _VisionOnlyWorker:
         logger.info("Vision worker %s stopped", self.camera_id)
 
     def _run(self):
+        rc = self.reconnect
+        backoff_delay = rc.base_delay
+
         cap = create_capture(self.source)
-        if cap is None and self._is_stream:
-            for attempt in range(1, 4):
-                logger.warning("[%s] Cannot open camera (attempt %d/3)", self.camera_id, attempt + 1)
-                time.sleep(2)
+        while cap is None and self._is_stream:
+            logger.warning("[%s] Cannot open camera, retrying in %.1fs", self.camera_id, backoff_delay)
+            time.sleep(backoff_delay)
+            try:
                 cap = create_capture(self.source)
-                if cap is not None:
-                    break
+            except Exception:
+                logger.exception("[%s] create_capture failed during initial connect", self.camera_id)
+                cap = None
+            if cap is None:
+                backoff_delay = min(backoff_delay * 2, rc.max_delay)
 
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
@@ -290,7 +316,7 @@ class _VisionOnlyWorker:
             buffer: deque = deque()
             frame_id = 0
             consecutive_failures = 0
-            max_failures = 5
+            max_failures = rc.max_failures
             skip_interval = 1
             connect_wall = time.monotonic()
 
@@ -301,21 +327,29 @@ class _VisionOnlyWorker:
                         consecutive_failures += 1
                         if consecutive_failures >= max_failures:
                             logger.warning(
-                                "Vision worker %s reconnecting... (%d failures)",
+                                "Vision worker %s reconnecting... (%d failures, backoff=%.1fs)",
                                 self.camera_id,
                                 consecutive_failures,
+                                backoff_delay,
                             )
                             cap.release()
-                            time.sleep(1)
-                            cap = create_capture(self.source)
-                            if cap is None:
+                            time.sleep(backoff_delay)
+                            try:
+                                new_cap = create_capture(self.source)
+                            except Exception:
+                                logger.exception("[%s] create_capture failed during reconnect", self.camera_id)
+                                new_cap = None
+                            if new_cap is None:
                                 logger.error("Vision worker %s reconnect failed for %s", self.camera_id, self.source)
-                                time.sleep(2)
+                                time.sleep(rc.reconnect_backoff)
+                                backoff_delay = min(backoff_delay * 2, rc.max_delay)
                                 continue
+                            cap = new_cap
                             consecutive_failures = 0
                             connect_wall = time.monotonic()
+                            backoff_delay = rc.base_delay
                         else:
-                            time.sleep(0.5)
+                            time.sleep(rc.read_backoff)
                     else:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         frame_id = 0
@@ -327,8 +361,8 @@ class _VisionOnlyWorker:
                 pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                 if pts_ms > 0:
                     lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
-                    if lag_ms > 60_000:
-                        logger.warning("[vis-only:%s] PTS lag=%.0fms > 60s, forcing reconnect", self.camera_id, lag_ms)
+                    if lag_ms > rc.pts_lag_threshold * 1000:
+                        logger.warning("[vis-only:%s] PTS lag=%.0fms > %.0fs, forcing reconnect", self.camera_id, lag_ms, rc.pts_lag_threshold)
                         consecutive_failures = max_failures
                         continue
                 if frame_id % skip_interval != 0:

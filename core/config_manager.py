@@ -9,7 +9,7 @@ import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileModifiedEvent
 
-from settings import LLMConfig, LogConfig, Thresholds, YOLOConfig
+from settings import LLMConfig, LogConfig, ReconnectConfig, Thresholds, YOLOConfig
 
 # ── DB Loading ───────────────────────────────────────────────────────
 
@@ -25,6 +25,7 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
         llm.api_key = llm_key
     db_url = os.environ.get("DATABASE_URL", "")
     log = LogConfig(db_url=db_url)
+    reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
 
     mode = raw.get("mode", "cv_pipeline") or "cv_pipeline"
 
@@ -37,7 +38,7 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
         len(spaces),
         mode,
     )
-    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode)
+    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode, reconnect)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class AppConfig:
         llm: LLMConfig,
         log: LogConfig,
         mode: str = "cv_pipeline",
+        reconnect: ReconnectConfig | None = None,
     ):
         self.cameras = cameras
         self.spaces = spaces
@@ -98,6 +100,7 @@ class AppConfig:
         self.llm = llm
         self.log = log
         self.mode = mode
+        self.reconnect = reconnect or ReconnectConfig()
 
 # ── Loading ────────────────────────────────────────────────────────
 
@@ -118,6 +121,7 @@ def load_config(
     yolo = YOLOConfig.from_dict(raw.get("yolo", {}))
     llm = LLMConfig.from_dict(raw.get("llm", {}))
     log = LogConfig.from_dict(raw.get("logging", {}))
+    reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
     mode = raw.get("mode", "cv_pipeline")
 
     # 12-factor: env overrides for secrets / deployment-specific values
@@ -134,7 +138,7 @@ def load_config(
         len(spaces),
         mode,
     )
-    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode)
+    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode, reconnect)
 
 
 def _read_yaml(path: str) -> Dict[str, Any]:

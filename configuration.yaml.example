@@ -37,6 +37,16 @@ llm:
   max_stale_threshold: 10.0 # 버퍼 항목 유효 시간 (초)
   cooldown_seconds: 30.0    # 로깅 후 전체 쿨다운 (초)
   early_trigger: 5.0        # 실제 대기시간 = cooldown - early_trigger
+  json_response_format: true  # response_format={"type": "json_object"} 강제 사용 여부
+
+# === 재연결 설정 ===
+reconnect:
+  max_failures: 5            # 재연결 트리거 전 연속 읽기 실패 횟수
+  base_delay: 1.0            # 백오프 시작 간격 (초) - exponential backoff 적용
+  max_delay: 300.0           # 최대 재연결 시도 간격 (초, 기본 5분)
+  read_backoff: 0.5          # read() 실패 시 대기 시간 (초)
+  reconnect_backoff: 2.0     # 재연결 실패 후 추가 대기 시간 (초)
+  pts_lag_threshold: 60.0    # PTS 지연 감지 임계값 (초) - 초과 시 강제 재연결
 
 # === 로깅 설정 ===
 logging:
