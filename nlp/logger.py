@@ -217,12 +217,14 @@ class SpaceLogger:
             ],
         })
         try:
-            r = self.client.chat.completions.create(
+            kwargs = dict(
                 model=self.config.model_name,
                 messages=messages,
-                response_format={"type": "json_object"},
                 max_tokens=512,
             )
+            if self.config.json_response_format:
+                kwargs["response_format"] = {"type": "json_object"}
+            r = self.client.chat.completions.create(**kwargs)
             text = r.choices[0].message.content.strip()
         except Exception as e:
             logger.error("Vision detect failed for %s: %s", camera_id, e)
@@ -316,9 +318,10 @@ class SpaceLogger:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_messages},
                 ],
-                "response_format": {"type": "json_object"},
                 "max_tokens": 2048,
             }
+            if self.config.json_response_format:
+                response_kwargs["response_format"] = {"type": "json_object"}
             response = self.client.chat.completions.create(**response_kwargs)
             text = response.choices[0].message.content.strip()
         except Exception as e:

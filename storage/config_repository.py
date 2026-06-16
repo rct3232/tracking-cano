@@ -34,8 +34,10 @@ class ConfigRepository:
         }
 
         with self._session_factory() as session:
+            result["reconnect"] = {}
+
             # prefix별 조회 (INDEX SCAN)
-            for prefix in ("mode", "thresholds", "yolo", "llm"):
+            for prefix in ("mode", "thresholds", "yolo", "llm", "reconnect"):
                 rows = session.query(AppSetting).filter(
                     AppSetting.key_prefix == prefix
                 ).all()
@@ -43,10 +45,10 @@ class ConfigRepository:
                 if prefix == "mode":
                     row = rows[0] if rows else None
                     result["mode"] = row.value_text or "" if row else ""
-                elif prefix == "thresholds":
-                    # thresholds는 모두 numeric
+                elif prefix in ("thresholds", "reconnect"):
+                    # thresholds / reconnect — 모두 numeric
                     for r in rows:
-                        result["thresholds"][r.key] = float(r.value_number) if r.value_number is not None else None
+                        result[prefix][r.key] = float(r.value_number) if r.value_number is not None else None
                 else:
                     # yolo / llm — mixed type
                     for r in rows:

@@ -29,7 +29,7 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
 
     mode = raw.get("mode", "cv_pipeline") or "cv_pipeline"
 
-    cameras = [CameraConfig(c) for c in raw["cameras"]]
+    cameras = _validate_camera_list(raw["cameras"])
     spaces = [SpaceConfig(s) for s in raw["spaces"]]
 
     logger.info(
@@ -153,9 +153,8 @@ def _read_yaml(path: str) -> Dict[str, Any]:
     return data
 
 
-def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
-    """Parse the cameras list from raw config."""
-    camera_list = raw.get("cameras", [])
+def _validate_camera_list(camera_list: List[Any]) -> List[CameraConfig]:
+    """Validate camera dicts and build CameraConfig list."""
     if not isinstance(camera_list, list):
         raise ValueError("'cameras' must be a list")
 
@@ -170,6 +169,11 @@ def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
         seen_ids.add(cam_id)
         cameras.append(CameraConfig(item))
     return cameras
+
+
+def _parse_cameras(raw: Dict[str, Any]) -> List[CameraConfig]:
+    """Parse the cameras list from raw config."""
+    return _validate_camera_list(raw.get("cameras", []))
 
 
 def _parse_spaces(raw: Dict[str, Any]) -> List[SpaceConfig]:

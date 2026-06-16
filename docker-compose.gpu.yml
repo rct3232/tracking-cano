@@ -12,7 +12,7 @@ services:
       - ./configuration.yaml:/app/configuration.yaml:ro
       - ./logs:/app/logs
       - ./output:/app/output
-    command: ["python", "main.py", "--live"]
+    command: ["python", "main.py"]
     deploy:
       resources:
         reservations:

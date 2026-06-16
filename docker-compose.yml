@@ -16,5 +16,5 @@ services:
       - ./output:/app/output
     ports:
       - "8000:8000"
-    command: ["python", "main.py", "--live"]
+    command: ["python", "main.py"]
     restart: unless-stopped

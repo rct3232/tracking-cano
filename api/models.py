@@ -117,6 +117,7 @@ class LLMUpdate(BaseModel):
     snapshot_interval: Optional[float] = None
     cooldown_seconds: Optional[float] = None
     early_trigger: Optional[float] = None
+    json_response_format: Optional[bool] = None
 
 
 # ── Status ────────────────────────────────────────────────────────
