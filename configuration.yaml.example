@@ -51,6 +51,8 @@ reconnect:
 # === 로깅 설정 ===
 logging:
   log_dir: logs
+  retention_hours: 24       # output/에서 정리할 파일 나이(시간)
+  cleanup_enabled: true     # 자동 정리 활성화 여부
   # DATABASE_URL은 .env 또는 환경변수로 설정 (여기서 설정 불가)
 
 # === REST API 설정 ===
@@ -76,6 +78,8 @@ api:
 # MINIO_ACCESS_KEY=myaccesskey
 # MINIO_SECRET_KEY=mysecretkey123
 # MINIO_BUCKET=snapshots  # 기본값
+# MINIO_RETENTION_HOURS=24      # 정리 대상 나이(시간)
+# MINIO_CLEANUP_ENABLED=true    # 자동 정리 활성화 여부
 
 # === 공간 정의 ===
 # spaces:

@@ -60,7 +60,7 @@ def run_multi(config_path: str, repo: LogRepository | None = None, app_config: A
 
     event_bus = EventBus()
     minio_cfg = MinIOConfig.from_env()
-    space_logger = SpaceLogger(app_config.llm, repo=repo, event_bus=event_bus, minio_config=minio_cfg)
+    space_logger = SpaceLogger(app_config.llm, repo=repo, event_bus=event_bus, minio_config=minio_cfg, log_config=app_config.log)
     orchestrator = Orchestrator(
         app_config, space_logger, default_model_path=app_config.yolo.model_path, repo=repo, event_bus=event_bus
     )
@@ -95,6 +95,7 @@ def run_multi(config_path: str, repo: LogRepository | None = None, app_config: A
     finally:
         config_watcher_stop()
         orchestrator.stop()
+        space_logger.stop()
 
 
 def _on_config_change(orchestrator: Orchestrator, space_logger: SpaceLogger, new_config, diff):

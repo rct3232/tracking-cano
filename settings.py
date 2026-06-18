@@ -65,6 +65,8 @@ class LLMConfig:
 class LogConfig:
     db_url: str = "sqlite:///logs/tracking.db"
     log_dir: str = "logs"
+    retention_hours: int = 24
+    cleanup_enabled: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LogConfig':
@@ -78,6 +80,8 @@ class MinIOConfig:
     access_key: str = ""
     secret_key: str = ""
     bucket: str = "snapshots"
+    retention_hours: int = 24
+    cleanup_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> 'MinIOConfig':
@@ -87,6 +91,8 @@ class MinIOConfig:
             access_key=os.environ.get("MINIO_ACCESS_KEY", ""),
             secret_key=os.environ.get("MINIO_SECRET_KEY", ""),
             bucket=os.environ.get("MINIO_BUCKET", "snapshots"),
+            retention_hours=int(os.environ.get("MINIO_RETENTION_HOURS", "24")),
+            cleanup_enabled=os.environ.get("MINIO_CLEANUP_ENABLED", "true").lower() != "false",
         )
 
     @property
