@@ -338,7 +338,7 @@ class _CameraWorker:
                         image_b64=image_b64,
                         target_coordinate=coord,
                     )
-                    if self.orchestrator:
+                    if self.orchestrator and detect.target_present:
                         self.orchestrator.update_snapshot(self.camera_id, snap)
 
                     # Interaction change → space snapshot
@@ -440,7 +440,7 @@ class Orchestrator:
         with self._snapshot_lock:
             for cam_id in space_cameras:
                 snap = self._snapshots.get(cam_id)
-                if snap is None:
+                if snap is None or not snap.target_present:
                     continue
                 snapshots[cam_id] = snap
         if not snapshots:
@@ -471,6 +471,14 @@ class Orchestrator:
         self._cam_to_space = _build_cam_to_space(new_config)
         if self.space_logger:
             self.space_logger.config = new_config.llm
+            self.space_logger.client = None
+        if self._vision_detector:
+            self._vision_detector._config = new_config.llm
+            self._vision_detector._cam_to_space = self._cam_to_space
+            with self._vision_detector._spaces_lock:
+                for s in new_config.spaces:
+                    self._vision_detector._spaces[s.id] = s
+        self._snapshot_debounce.clear()
 
     @property
     def spaces(self) -> list[SpaceConfig]:

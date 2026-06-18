@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import uuid4
@@ -85,7 +85,7 @@ def _state_to_movement(state, direction: str) -> str:
 
 
 class SpaceLogger:
-    def __init__(self, config: LLMConfig, log_dir: str = "logs", repo=None, event_bus=None, minio_config=None):
+    def __init__(self, config: LLMConfig, log_dir: str = "logs", repo=None, event_bus=None, minio_config=None, log_config=None):
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +96,7 @@ class SpaceLogger:
         self._lock = threading.Lock()
         self._minio = None
         self._minio_config = minio_config
+        self._log_config = log_config
         if minio_config and minio_config.is_configured:
             from minio import Minio
             self._minio = Minio(
@@ -104,6 +105,86 @@ class SpaceLogger:
                 secret_key=minio_config.secret_key,
                 secure=True,
             )
+        self._cleanup_stop = threading.Event()
+        self._last_cleanup_time: float = 0.0
+        self._cleanup_thread = None
+        self._start_cleanup_scheduler()
+
+    def _start_cleanup_scheduler(self):
+        if self._cleanup_thread and self._cleanup_thread.is_alive():
+            return
+        self._cleanup_stop.clear()
+        t = threading.Thread(target=self._run_cleanup_scheduler, daemon=True, name="snapshot-cleanup")
+        t.start()
+        self._cleanup_thread = t
+
+    def _run_cleanup_scheduler(self):
+        while not self._cleanup_stop.is_set():
+            now = datetime.now(timezone.utc)
+            seconds_to_next_hour = (59 - now.minute) * 60 + (59 - now.second) - now.microsecond / 1e6
+            remaining = seconds_to_next_hour
+            while remaining > 0 and not self._cleanup_stop.is_set():
+                wait = min(remaining, 300)
+                self._cleanup_stop.wait(wait)
+                remaining -= wait
+            if self._cleanup_stop.is_set():
+                break
+            now_ts = time.time()
+            if now_ts - self._last_cleanup_time < 60:
+                continue
+            self._last_cleanup_time = now_ts
+            logger.info("[cleanup] Running hourly cleanup at %s", datetime.now(timezone.utc).isoformat())
+            if self._minio:
+                self._do_cleanup_minio()
+            else:
+                self._do_cleanup_local()
+
+    def _do_cleanup_minio(self):
+        if not self._minio or not self._minio_config:
+            return
+        if not self._minio_config.cleanup_enabled:
+            logger.debug("[cleanup] MinIO cleanup disabled")
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._minio_config.retention_hours)
+        deleted = 0
+        try:
+            for obj in self._minio.list_objects(self._minio_config.bucket):
+                if obj.last_modified < cutoff:
+                    self._minio.remove_object(self._minio_config.bucket, obj.object_name)
+                    logger.debug("[cleanup] Deleted MinIO object: %s (modified: %s)", obj.object_name, obj.last_modified)
+                    deleted += 1
+        except Exception as e:
+            logger.error("[cleanup] MinIO cleanup failed: %s", e)
+        logger.info("[cleanup] MinIO: deleted %d objects older than %dh", deleted, self._minio_config.retention_hours)
+
+    def _do_cleanup_local(self):
+        if not self._log_config:
+            return
+        if not self._log_config.cleanup_enabled:
+            logger.debug("[cleanup] local cleanup disabled")
+            return
+        output_dir = Path("output")
+        if not output_dir.exists():
+            return
+        cutoff_ts = time.time() - self._log_config.retention_hours * 3600
+        deleted = 0
+        try:
+            for f in output_dir.iterdir():
+                if f.is_file() and f.suffix == ".jpg":
+                    if f.stat().st_mtime < cutoff_ts:
+                        f.unlink()
+                        logger.debug("[cleanup] Deleted local file: %s", f.name)
+                        deleted += 1
+        except Exception as e:
+            logger.error("[cleanup] Local cleanup failed: %s", e)
+        logger.info("[cleanup] output/: deleted %d files older than %dh", deleted, self._log_config.retention_hours)
+
+    def stop(self):
+        """Stop the cleanup scheduler thread."""
+        logger.info("[cleanup] Stopping cleanup scheduler")
+        self._cleanup_stop.set()
+        if self._cleanup_thread and self._cleanup_thread.is_alive():
+            self._cleanup_thread.join(timeout=305)
 
     def _ensure_client(self):
         if self.client is None:
@@ -367,7 +448,7 @@ class SpaceLogger:
                     desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
                     raw_coord = cam_resp.get("target_coordinate")
                     if raw_coord and len(raw_coord) == 4:
-                        coord = [raw_coord[1], raw_coord[0], raw_coord[3], raw_coord[2]]
+                        coord = [raw_coord[1] / 1000.0, raw_coord[0] / 1000.0, raw_coord[3] / 1000.0, raw_coord[2] / 1000.0]
                     else:
                         coord = snap.target_coordinate
                     merged_present = cam_resp.get("target_present", False)
@@ -382,7 +463,7 @@ class SpaceLogger:
 
             per_camera_present.append(merged_present)
 
-            if snap.image_b64 or snap.images:
+            if (snap.image_b64 or snap.images) and snap.target_present:
                 img_to_save = snap.images[-1] if snap.images else snap.image_b64
                 self._save_snapshot_image(img_to_save, space_name, cam_id, timestamp, coord)
 
@@ -465,7 +546,7 @@ class SpaceLogger:
                 coord = snap.target_coordinate
             reasoning_parts.append(f"{cam_id}: {desc}")
 
-            if snap.image_b64 or snap.images:
+            if (snap.image_b64 or snap.images) and snap.target_present:
                 img_to_save = snap.images[-1] if snap.images else snap.image_b64
                 self._save_snapshot_image(img_to_save, space_name or space_id, cam_id, timestamp, coord)
 
