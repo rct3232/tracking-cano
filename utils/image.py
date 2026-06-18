@@ -65,9 +65,15 @@ def draw_normalized_bbox(
     if img is None:
         return image_b64
     h, w = img.shape[:2]
-    # Support both pixel coords and normalized coords
+    # Support pixel coords, 0-1000 scale, and normalized (0-1) coords
     if any(v > 1.0 for v in coords):
-        x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+        if all(0 <= v <= 1000 for v in coords):
+            x1 = int(coords[0] * w / 1000)
+            y1 = int(coords[1] * h / 1000)
+            x2 = int(coords[2] * w / 1000)
+            y2 = int(coords[3] * h / 1000)
+        else:
+            x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
     else:
         x1 = int(coords[0] * w)
         y1 = int(coords[1] * h)

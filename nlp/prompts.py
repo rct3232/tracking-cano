@@ -16,8 +16,8 @@ SNAPSHOT_VISION_PROMPT = (
      '   For each such camera, provide:\n'
      '   - "target_present": true\n'
      '   - "description": a natural-language description of what the target did over the 2.5s period — position changes, movement direction/speed, and any interactions with objects or surroundings.\n'
-     '   - "target_coordinate" (optional): bbox as normalized coordinates [y_min, x_min, y_max, x_max] from the latest image,\n'
-     '     where values are between 0.0 and 1.0. IMPORTANT: Y=0 is the TOP of the image, Y=1 is the BOTTOM.\n'
+     '   - "target_coordinate" (optional): bbox as [y_min, x_min, y_max, x_max] from the latest image,\n'
+     '     where each value is an integer between 0 and 1000. Y=0 is the TOP of the image, Y=1000 is the BOTTOM.\n'
      "4) Cameras WITHOUT a visible target: OMIT them from the 'cameras' dict entirely.\n"
     "5) Top-level 'target_present': true if ANY camera has target_present=true.\n"
     "6) 'reasoning': a comprehensive summary in chronological order — what the target did across cameras and time, including movements and interactions with objects or surroundings.\n\n"
@@ -28,7 +28,7 @@ SNAPSHOT_VISION_PROMPT = (
      "Do not defer to initial detection hints when the images themselves show nothing.\n\n"
      'OUTPUT format:\n'
      '{"target_present": bool, "cameras": {cam_id_with_target: {"target_present": true, "description": str, "target_coordinate": [y_min, x_min, y_max, x_max]}}, "reasoning": "str"}\n'
-     'e.g. {"target_present": true, "cameras": {"livingroom": {"target_present": true, "description": "person sitting on chair", "target_coordinate": [0.15, 0.2, 0.4, 0.5]}}, "reasoning": "target was visible in livingroom"}\n'
+     'e.g. {"target_present": true, "cameras": {"livingroom": {"target_present": true, "description": "person sitting on chair", "target_coordinate": [150, 200, 400, 500]}}, "reasoning": "target was visible in livingroom"}\n'
      "No markdown, no code fences.\n"
 )
 
@@ -41,8 +41,8 @@ SNAPSHOT_TRACKING_PROMPT = (
     "2) Only include cameras where the target is present. For each such camera, provide:\n"
     '   - "target_present": true\n'
     '   - "description": one sentence describing behavior (movement direction, speed, interactions)\n'
-     '   - "target_coordinate" (optional): bbox as normalized [y_min, x_min, y_max, x_max],\n'
-    '     values between 0.0 and 1.0. IMPORTANT: Y=0 is the TOP of the image, Y=1 is the BOTTOM.\n'
+   '   - "target_coordinate" (optional): bbox as [y_min, x_min, y_max, x_max],\n'
+     '     where each value is an integer between 0 and 1000. Y=0 is the TOP of the image, Y=1000 is the BOTTOM.\n'
     "3) Cameras WITHOUT a target: OMIT them from the 'cameras' dict entirely.\n"
     "4) Top-level 'target_present': true if ANY camera has target_present=true.\n"
     "5) 'reasoning': one sentence combining all camera observations.\n\n"
