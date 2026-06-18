@@ -10,7 +10,10 @@ def apply_config_changes(orchestrator, space_logger, new_config):
     old = orchestrator.app_config
     diff = diff_configs(old, new_config)
 
-    # 1. camera/space 구조 변경 (기존 로직 유지)
+    # config 먼저 적용 → downstream 동작이 최신 설정 기준으로 동작
+    orchestrator.update_config(new_config)
+
+    # 1. camera/space 구조 변경
     for cam_id, (old_space, new_space) in diff.reassigned_cameras.items():
         logger.info("Camera %s reassigned: %s → %s", cam_id, old_space, new_space)
         orchestrator.reassign_camera(cam_id, old_space, new_space)
@@ -54,6 +57,10 @@ def apply_config_changes(orchestrator, space_logger, new_config):
         logger.info("LLM config changed — restarting cameras")
         needs_restart = True
 
+    if old.reconnect != new_config.reconnect:
+        logger.info("Reconnect config changed — restarting cameras")
+        needs_restart = True
+
     # camera 개별 설정 변경 감지
     for cam in new_config.cameras:
         old_cam = next((c for c in old.cameras if c.id == cam.id), None)
@@ -68,8 +75,6 @@ def apply_config_changes(orchestrator, space_logger, new_config):
 
     if needs_restart:
         _restart_all_cameras(orchestrator, space_logger, new_config)
-
-    orchestrator.update_config(new_config)
 
 
 def camera_values_differ(old_cam, new_cam):

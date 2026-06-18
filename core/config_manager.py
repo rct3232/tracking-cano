@@ -281,7 +281,7 @@ class ConfigWatcher:
             self._last_config = new_config
             return
         diff = diff_configs(self._last_config, new_config)
-        if diff.is_empty:
+        if diff.is_empty and self._last_config == new_config:
             return
         logger.info("Config change detected: %s", diff)
         self._last_config = new_config

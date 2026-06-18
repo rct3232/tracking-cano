@@ -103,6 +103,18 @@ class ReconnectConfig:
     reconnect_backoff: float = 2.0
     pts_lag_threshold: float = 60.0
 
+    def __eq__(self, other):
+        if not isinstance(other, ReconnectConfig):
+            return NotImplemented
+        return (
+            self.max_failures == other.max_failures
+            and self.base_delay == other.base_delay
+            and self.max_delay == other.max_delay
+            and self.read_backoff == other.read_backoff
+            and self.reconnect_backoff == other.reconnect_backoff
+            and self.pts_lag_threshold == other.pts_lag_threshold
+        )
+
     @classmethod
     def from_dict(cls, d: dict) -> 'ReconnectConfig':
         valid = {k: v for k, v in d.items() if k in cls.__annotations__}
