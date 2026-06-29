@@ -26,22 +26,13 @@ async def status(_: str = Depends(verify_token)) -> SystemStatus:
     if _orchestrator is not None:
         # Cameras
         for cam in _orchestrator.app_config.cameras:
-            worker_state = None
-            if cam.id in _orchestrator._workers:
-                worker_state = "running"
-            elif cam.id in _orchestrator._collectors:
-                worker_state = "collector"
-            else:
-                worker_state = "stopped"
+            worker_state = "collector" if cam.id in _orchestrator._collectors else "stopped"
 
             cameras_resp.append(CameraResponse(
                 id=cam.id,
                 source=cam.source,
                 status=cam.status,
                 target_classes=cam.target_classes,
-                interaction_classes=cam.interaction_classes,
-                model_size=cam.model_size,
-                frame_skip=cam.frame_skip,
                 worker_state=worker_state,
             ))
 

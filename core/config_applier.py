@@ -45,14 +45,6 @@ def apply_config_changes(orchestrator, space_logger, new_config):
     # 2. 설정 값 변경 감지 → 영향받는 카메라 재시작
     needs_restart = False
 
-    if old.thresholds != new_config.thresholds:
-        logger.info("Thresholds changed — restarting cameras")
-        needs_restart = True
-
-    if old.yolo != new_config.yolo:
-        logger.info("YOLO config changed — restarting cameras")
-        needs_restart = True
-
     if old.llm != new_config.llm:
         logger.info("LLM config changed — restarting cameras")
         needs_restart = True
@@ -68,19 +60,13 @@ def apply_config_changes(orchestrator, space_logger, new_config):
             logger.info("Camera %s settings changed — restarting", cam.id)
             needs_restart = True
 
-    # mode 변경 감지
-    if old.mode != new_config.mode:
-        logger.info("Mode changed: %s → %s — restarting cameras", old.mode, new_config.mode)
-        needs_restart = True
-
     if needs_restart:
         _restart_all_cameras(orchestrator, space_logger, new_config)
 
 
 def camera_values_differ(old_cam, new_cam):
     """두 CameraConfig의 설정 값이 다른지 비교."""
-    for attr in ("source", "status", "target_classes", "interaction_classes",
-                 "model_size", "frame_skip", "quantize", "llm_system_prompt"):
+    for attr in ("source", "status", "target_classes", "llm_system_prompt"):
         if getattr(old_cam, attr) != getattr(new_cam, attr):
             return True
     return False
@@ -88,7 +74,7 @@ def camera_values_differ(old_cam, new_cam):
 
 def _restart_all_cameras(orchestrator, space_logger, new_config):
     """모든 카메라 중지 → config 업데이트 → 재시작."""
-    cam_ids = list(orchestrator._workers.keys()) + list(orchestrator._collectors.keys())
+    cam_ids = list(orchestrator._collectors.keys())
 
     for cam_id in cam_ids:
         orchestrator.remove_camera(cam_id)

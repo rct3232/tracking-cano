@@ -1,18 +1,16 @@
 # AGENTS.md — tracking-cano
 
 ## 프로젝트 개요
-CV Pipeline: YOLO26 → ByteTrack → Movement Analyzer → Interaction Detector → snapshot trigger
 LLM Vision: `_BatchCollector`(0.5s timer, buffer maxlen=5) → `SpaceLogger.vision_detect()` → snapshot trigger
 Snapshot: CameraSnapshot buffer freeze → `SpaceLogger.space_snapshot()` → DB(batch_id) + image save(output/)
 - Orchestrator: `_CameraWorker`(daemon thread)로 다중 카메라 관리 + `_SimpleVisionDetector`(round-robin detect)
-- Detection: `cv_pipeline`(YOLO+ByteTrack, target_present 변화 시 snapshot) 또는 `llm_vision`(LLM detect 시 snapshot)
+- Detection: `llm_vision`(LLM detect 시 snapshot) — `_SimpleVisionDetector` round-robin per space
 - Snapshot: `CameraSnapshot` registry → `space_snapshot()` → LLM space-level 분석 → per-camera detect + space log insert (동일 batch_id)
 
 ## Commandments
 0. **디버깅 시 DEBUG 로깅 필수** — 문제 진단이 필요한 경우 반드시 `--verbose`/`-v`(또는 `LOG_LEVEL=DEBUG`)를 추가하여 실행하고, `docker logs`(또는 stdout) 출력에서 증거를 수집할 것. 추측으로 원인을 단정하지 말 것.
 1. **코드가 진실** — 설정값/env var/CLI 플래그는 settings.py, configuration.yaml.example, main.py --help를 직접 읽고 AGENTS.md에 값 나열 금지
-2. **State hold 보호** — pipeline.py 수정 시 `_state_hold` → `_prev_states` → `_check_disappeared()` 체인과의 상호작용 반드시 고려
-3. **지연 로드 원칙** — Tracker YOLO는 `_ensure_loaded()`로만 로드, `__init__`에서 로드 금지
+
 4. **LLM 직접 호출 금지** — 반드시 `LLMCallDebouncer`(cooldown=3s) 경유
 5. **환경변수 추가 시 configuration.yaml.example 필수** — 새 설정 추가 시 configuration.yaml.example에 반드시 추가
 6. **벤치마크 기록 의무** — bench.py 실행 후 BENCHMARKS.md 갱신 필수
@@ -24,15 +22,12 @@ Snapshot: CameraSnapshot buffer freeze → `SpaceLogger.space_snapshot()` → DB
 ## 핵심 파일
 | 파일 | 역할 |
 |------|------|
-| `core/pipeline.py` | `process_frame()` → state hold + disappear/interaction change 감지 |
-| `core/pipeline.py` | `process_frame()` → state hold + disappear/interaction change 감지 |
+
 | `core/orchestrator.py` | `_CameraWorker`(daemon, 재연결), `_SimpleVisionDetector`, snapshot registry, `diff_configs()` hot-reload |
 | `core/vision_worker.py` | `_BatchCollector` — LLM vision용 timer-based capture, sliding buffer, reconnect 시 buffer.clear() |
-| `modules/tracker.py` | YOLO+ByteTrack, `_ensure_loaded()` 지연로드, HybridDetector(tile fallback) |
-| `modules/analyzer.py` | `classify_movement()` → STOPPED/SLOW/FAST/DASH/ROTATE |
-| `modules/interaction_detector.py` | IoU+거리 기반: interacting/contact/nearby |
+
 | `nlp/logger.py` | `LLMCallDebouncer`(3s), `SpaceLogger.vision_detect()`, `SpaceLogger.space_snapshot()`, `_snapshot_fallback()` |
-| `settings.py` | Thresholds/YOLOConfig/LLMConfig/PipelineConfig dataclasses |
+| `settings.py` | LLMConfig/LogConfig/MinIOConfig/ReconnectConfig dataclasses |
 | `core/config_manager.py` | YAML 로딩, `diff_configs()`, watchdog hot-reload |
 | `utils/video.py` | `create_capture()`, `resolve_source()` |
 | `utils/image.py` | `draw_normalized_bbox()` — LLM 응답 bbox 시각화 |

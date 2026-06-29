@@ -13,13 +13,13 @@ from uuid import uuid4
 from openai import OpenAI
 
 from settings import LLMConfig
-from modules.interaction_detector import InteractionResult
-from modules.tracker import TrackedBBox
 from storage.database import LogEntry
 from utils.image import draw_normalized_bbox
 from nlp.prompts import DETECT_SYSTEM_PROMPT, SNAPSHOT_VISION_PROMPT, SNAPSHOT_TRACKING_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_LANG_NAMES = {"ko": "Korean (한국어)", "ja": "Japanese (日本語)", "en": "English"}
 
 DIRECTION_MAP = {
     (337.5, 360): "up",
@@ -39,8 +39,6 @@ class CameraSnapshot:
     camera_id: str
     target_present: bool
     timestamp: float
-    tracked_list: List[TrackedBBox] = field(default_factory=list)
-    interactions: List[InteractionResult] = field(default_factory=list)
     image_b64: Optional[str] = None
     images: List[str] = field(default_factory=list)
     target_coordinate: Optional[List[float]] = None
@@ -60,28 +58,8 @@ class LLMCallDebouncer:
         return True
 
 
-def _angle_to_direction(speed: float, angle: float) -> str:
-    if speed < 5:
-        return "stationary"
-    for (lo, hi), direction in DIRECTION_MAP.items():
-        if lo <= angle < hi:
-            return direction
-    return "unknown"
 
 
-def _state_to_movement(state, direction: str) -> str:
-    if state is None:
-        return "UNKNOWN"
-    name = state.name
-    if name == "STOPPED":
-        return "stopped"
-    if name == "ROTATING":
-        return "rotating"
-    if name in ("DASHING", "FAST_MOVE"):
-        return f"moving quickly {direction}" if direction not in ("stationary", "unknown") else "moving quickly"
-    if name == "SLOW_MOVE":
-        return f"moving slowly {direction}" if direction not in ("stationary", "unknown") else "moving slowly"
-    return "UNKNOWN"
 
 
 class SpaceLogger:
@@ -201,7 +179,7 @@ class SpaceLogger:
                    batch_id: str = "", subject_id: str | None = None,
                    target_present: bool | None = None,
                    description: str | None = None, target_coordinate: list | None = None,
-                   raw_json: str | None = None):
+                   raw_json: str | None = None, image_path: str | None = None):
         if self._repo is None:
             return
         import json as _json
@@ -218,22 +196,26 @@ class SpaceLogger:
             description=description,
             target_coordinate=_json.dumps(target_coordinate) if target_coordinate is not None else None,
             raw_json=raw_json,
+            image_path=image_path,
             created_at=datetime.now(timezone.utc),
         )
         self._repo.save(entry)
         if self._event_bus:
             import json as _json_ev
             ts_str = timestamp or datetime.now(timezone.utc).isoformat()
+            data: dict = {
+                "id": entry.id,
+                "timestamp": ts_str,
+                "log_type": log_type,
+                "subject_id": subject_id,
+                "target_present": target_present,
+                "description": description,
+            }
+            if image_path:
+                data["image_url"] = f"/api/logs/{entry.id}/image"
             self._event_bus.publish({
                 "type": "log",
-                "data": {
-                    "id": entry.id,
-                    "timestamp": ts_str,
-                    "log_type": log_type,
-                    "subject_id": subject_id,
-                    "target_present": target_present,
-                    "description": description,
-                },
+                "data": data,
             })
 
     @staticmethod
@@ -289,11 +271,13 @@ class SpaceLogger:
         combined_system = DETECT_SYSTEM_PROMPT.format(target_label=target_label)
         if llm_system_prompt:
             combined_system = combined_system + "\n\n" + llm_system_prompt
+        lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
+        combined_system += f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
         messages = [{"role": "system", "content": combined_system}]
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Look at this image carefully. Is there a {target_label} present in this scene? If you see one, report it even if it is small or partially hidden.\n\nAnswer in JSON only:\n{{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
+                {"type": "text", "text": f"Look at this image carefully. Is there a {target_label} present in this scene? If you see one, report it even if it is small or partially hidden.\n\nAnswer in JSON only in {lang_name}:\n{{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
             ],
         })
@@ -359,17 +343,17 @@ class SpaceLogger:
                         "type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{snap.image_b64}"}
                     })
-                tracking_str = self._build_tracking_summary(snap.tracked_list, snap.interactions)
-                if tracking_str:
-                    coord_str = f" | bbox {snap.target_coordinate}" if snap.target_coordinate else ""
-                    user_messages.append({"type": "text", "text": tracking_str + coord_str})
+
             if target_classes:
                 unique_classes = list(dict.fromkeys(target_classes))
                 user_messages.append({"type": "text", "text": f"\nTarget objects: {', '.join(unique_classes)}"})
             parts = [SNAPSHOT_VISION_PROMPT]
             if llm_system_prompt:
                 parts.append(f"Additional instructions:\n{llm_system_prompt}")
+            lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
+            parts.append(f"IMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English.")
             system_prompt = "\n".join(parts)
+            user_messages.append({"type": "text", "text": f"Respond in {lang_name}."})
         else:
             prompt_lines = [f"Timestamp: {timestamp}", f"Space: {space_name}", ""]
             if target_classes:
@@ -381,11 +365,12 @@ class SpaceLogger:
                 if not snap.target_present:
                     prompt_lines.append(f"- {cam_id}: no target detected")
                     continue
-                tracking_str = self._build_tracking_summary(snap.tracked_list, snap.interactions)
+                tracking_str = "target detected" if snap.target_present else "no target"
                 coord_str = f" | bbox {snap.target_coordinate}" if snap.target_coordinate else ""
                 prompt_lines.append(f"- {cam_id}: {tracking_str}{coord_str}")
-            system_prompt = SNAPSHOT_TRACKING_PROMPT
-            user_messages = [{"type": "text", "text": "\n".join(prompt_lines)}]
+            lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
+            system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
+            user_messages = [{"type": "text", "text": "\n".join(prompt_lines) + f"\n\nRespond in {lang_name}."}]
 
         if not self.debouncer.should_call(f"{space_id}_snapshot"):
             logger.debug("[space:%s] snapshot debounce suppress", space_id)
@@ -407,12 +392,12 @@ class SpaceLogger:
             text = response.choices[0].message.content.strip()
         except Exception as e:
             logger.error("Snapshot LLM API call failed for %s: %s", space_id, e)
-            return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id)
+            return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id, target_classes)
 
         parsed = self._parse_json_response(text, f"snapshot_{space_id}")
         if not parsed:
             logger.warning("[snapshot:%s] parse failed, raw: %s", space_id, text[:400])
-            return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id)
+            return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id, target_classes)
 
         cameras_resp = parsed.get("cameras", {})
         reasoning = parsed.get("reasoning", "")
@@ -438,6 +423,7 @@ class SpaceLogger:
 
         per_camera_present: List[bool] = []
         for cam_id, snap in snapshots.items():
+            class_name: str = ""
             if cam_id in cameras_resp:
                 cam_resp = cameras_resp[cam_id]
                 if isinstance(cam_resp, str):
@@ -446,6 +432,7 @@ class SpaceLogger:
                     merged_present = False
                 elif isinstance(cam_resp, dict):
                     desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
+                    class_name = cam_resp.get("class_name", "") or ""
                     raw_coord = cam_resp.get("target_coordinate")
                     if raw_coord and len(raw_coord) == 4:
                         coord = [raw_coord[1] / 1000.0, raw_coord[0] / 1000.0, raw_coord[3] / 1000.0, raw_coord[2] / 1000.0]
@@ -463,9 +450,10 @@ class SpaceLogger:
 
             per_camera_present.append(merged_present)
 
+            img_path = None
             if (snap.image_b64 or snap.images) and snap.target_present:
                 img_to_save = snap.images[-1] if snap.images else snap.image_b64
-                self._save_snapshot_image(img_to_save, space_name, cam_id, timestamp, coord)
+                img_path = self._save_snapshot_image(img_to_save, space_name, cam_id, timestamp, coord, class_name)
 
             self._db_insert(
                 log_type="detect",
@@ -475,6 +463,7 @@ class SpaceLogger:
                 target_present=merged_present,
                 description=desc,
                 target_coordinate=coord,
+                image_path=img_path,
             )
 
         target_present_all = any(per_camera_present)
@@ -495,29 +484,20 @@ class SpaceLogger:
             raw_json=log_text,
         )
 
+        logger.debug("[snapshot:%s] parsed per-camera: %s", space_id, json.dumps(cameras_resp))
         logger.info("[snapshot:%s] cameras=%d reasoning=%s", space_id, len(snapshots), reasoning)
         return log_text
 
-    def _build_tracking_summary(self, tracked_list: List[TrackedBBox],
-                                interactions: List[InteractionResult]) -> str:
-        parts = []
-        for t in tracked_list:
-            movement = _state_to_movement(t.state, _angle_to_direction(t.speed, t.direction_angle))
-            parts.append(f"{t.class_name}: {movement}")
-        if interactions:
-            for ir in interactions:
-                rel = {"interacting": "touching", "contact": "touching", "nearby": "near"}.get(ir.relation_type, ir.relation_type)
-                parts.append(f"nearby: {ir.class_name} ({rel})")
-        return " | ".join(parts)
 
     def _save_snapshot_image(self, image_b64: str, space_name: str,
-                              cam_id: str, timestamp: str, coord: Optional[List[float]] = None):
+                              cam_id: str, timestamp: str, coord: Optional[List[float]] = None,
+                              target_label: str = "") -> Optional[str]:
         try:
             capture_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H:%M:%S")
             filename = f"{space_name}_{cam_id}_{capture_ts}.jpg"
             img_data = image_b64
             if coord:
-                img_data = draw_normalized_bbox(image_b64, coord, label=space_name)
+                img_data = draw_normalized_bbox(image_b64, coord, label=target_label or space_name)
             img_bytes = base64.b64decode(img_data)
 
             if self._minio:
@@ -529,26 +509,31 @@ class SpaceLogger:
                 output_dir = Path("output")
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / filename).write_bytes(img_bytes)
+            return filename
         except Exception as e:
             logger.error("Failed to save snapshot image %s: %s", filename, e)
+            return None
 
     def _snapshot_fallback(self, space_id: str, snapshots: Dict[str, CameraSnapshot],
-                           timestamp: str, space_name: str = "",
-                           batch_id: str = "") -> str:
+                            timestamp: str, space_name: str = "",
+                            batch_id: str = "",
+                            target_classes: List[str] | None = None) -> str:
         if not batch_id:
             batch_id = uuid4().hex
         reasoning_parts = []
         for cam_id, snap in snapshots.items():
             desc = "no target detected"
             coord = None
-            if snap.target_present and snap.tracked_list:
-                desc = self._build_tracking_summary(snap.tracked_list, snap.interactions)
+            fallback_label = target_classes[0] if target_classes else ""
+            if snap.target_present:
+                desc = "target detected"
                 coord = snap.target_coordinate
             reasoning_parts.append(f"{cam_id}: {desc}")
 
+            img_path = None
             if (snap.image_b64 or snap.images) and snap.target_present:
                 img_to_save = snap.images[-1] if snap.images else snap.image_b64
-                self._save_snapshot_image(img_to_save, space_name or space_id, cam_id, timestamp, coord)
+                img_path = self._save_snapshot_image(img_to_save, space_name or space_id, cam_id, timestamp, coord, fallback_label)
 
             self._db_insert(
                 log_type="detect",
@@ -558,6 +543,7 @@ class SpaceLogger:
                 target_present=snap.target_present,
                 description=desc,
                 target_coordinate=coord,
+                image_path=img_path,
             )
 
         target_present_all = any(s.target_present for s in snapshots.values())

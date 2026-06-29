@@ -2,17 +2,13 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
-import cv2
-
-from settings import LLMConfig, PipelineConfig, ReconnectConfig, YOLOConfig
+from settings import LLMConfig, ReconnectConfig
 from core.config_manager import AppConfig, CameraConfig, SpaceConfig
 
-from core.pipeline import DetectResult, LogEvent, Pipeline
 from core.vision_worker import _BatchCollector
 from nlp.logger import CameraSnapshot, SpaceLogger
-from utils.video import create_capture
 
 logger = logging.getLogger(__name__)
 
@@ -194,220 +190,16 @@ class _SimpleVisionDetector:
             self._orchestrator.update_snapshot(cam_id, snap)
 
 
-class _CameraWorker:
-    def __init__(
-        self,
-        camera_id: str,
-        pipeline: Pipeline,
-        cap,
-        source: str,
-        stop_event: threading.Event,
-        frame_skip: int = 0,
-        on_finished: Optional[Callable[[str], None]] = None,
-        orchestrator: Optional["Orchestrator"] = None,
-        space_id: Optional[str] = None,
-        vision_enabled: bool = False,
-        reconnect: ReconnectConfig | None = None,
-    ):
-        self.camera_id = camera_id
-        self.pipeline = pipeline
-        self.cap = cap
-        self.source = source
-        self.stop_event = stop_event
-        self.frame_skip = frame_skip
-        self.on_finished = on_finished
-        self.orchestrator = orchestrator
-        self.space_id = space_id
-        self._vision_enabled = vision_enabled
-        self._is_stream = _is_stream_source(source)
-        self._finished = False
-        self.reconnect = reconnect or ReconnectConfig()
-        self.thread = threading.Thread(target=self._run, daemon=True, name=f"cam-{camera_id}")
-        self._vision_quality = pipeline.config.llm.vision_quality if hasattr(pipeline.config, 'llm') else 60
-        self._vision_max_width = pipeline.config.llm.vision_max_width if hasattr(pipeline.config, 'llm') else 1024
 
-    def _encode_frame(self, frame, target_coordinate=None, label=None):
-        h, w = frame.shape[:2]
-        if self._vision_max_width > 0 and w > self._vision_max_width:
-            scale = self._vision_max_width / w
-            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-        import base64 as _b64
-        _, buf = cv2.imencode(".png", frame)
-        raw_b64 = _b64.b64encode(buf).decode("utf-8")
-        if target_coordinate:
-            from utils.image import draw_normalized_bbox
-            return draw_normalized_bbox(raw_b64, target_coordinate, label=label)
-        return raw_b64
-
-    def start(self):
-        self.thread.start()
-
-    def stop(self):
-        self.stop_event.set()
-        self.thread.join(timeout=5)
-        if not self._finished:
-            self.pipeline.stop()
-            self.cap.release()
-            self._finished = True
-        logger.info("Camera %s stopped", self.camera_id)
-
-    def _run(self):
-        try:
-            rc = self.reconnect
-            frame_id = 0
-            consecutive_failures = 0
-            max_failures = rc.max_failures
-            skip_interval = self.frame_skip + 1 if self.frame_skip > 0 else 1
-            fps_log_interval = 5.0
-            fps_frame_count = 0
-            last_fps_log = time.perf_counter()
-            connect_wall = time.monotonic()
-            backoff_delay = rc.base_delay
-
-            while not self.stop_event.is_set():
-                ret, frame = self.cap.read()
-                if not ret:
-                    if self._is_stream:
-                        consecutive_failures += 1
-                        if consecutive_failures == 1:
-                            logger.warning("Camera %s read failure (1/%d), source=%s", self.camera_id, max_failures, self.source)
-                        if consecutive_failures >= max_failures:
-                            logger.warning("Camera %s reconnecting... (%d failures, backoff=%.1fs)", self.camera_id, consecutive_failures, backoff_delay)
-                            self.cap.release()
-                            time.sleep(backoff_delay)
-                            try:
-                                new_cap = create_capture(self.source)
-                            except Exception:
-                                logger.exception("[%s] create_capture failed during reconnect", self.camera_id)
-                                new_cap = None
-                            if new_cap is None:
-                                logger.error("Camera %s reconnect failed for %s", self.camera_id, self.source)
-                                time.sleep(rc.reconnect_backoff)
-                                backoff_delay = min(backoff_delay * 2, rc.max_delay)
-                                continue
-                            self.cap = new_cap
-                            consecutive_failures = 0
-                            connect_wall = time.monotonic()
-                            backoff_delay = rc.base_delay
-                        else:
-                            time.sleep(rc.read_backoff)
-                        continue
-                    else:
-                        logger.info("Camera %s video ended (%s)", self.camera_id, self.source)
-                        break
-                consecutive_failures = 0
-
-                pts_ms = self.cap.get(cv2.CAP_PROP_POS_MSEC)
-                if pts_ms > 0:
-                    lag_ms = pts_ms - (time.monotonic() - connect_wall) * 1000
-                    if lag_ms > rc.pts_lag_threshold * 1000:
-                        logger.warning("[%s] PTS lag=%.0fms > %.0fs, forcing reconnect", self.camera_id, lag_ms, rc.pts_lag_threshold)
-                        consecutive_failures = max_failures
-                        continue
-                if frame_id % skip_interval == 0:
-                    t0 = time.perf_counter()
-                    detect, log_event = self.pipeline.process_frame(frame, frame_id)
-                    dt = time.perf_counter() - t0
-                    logger.debug("[%s] frame=%d infer=%.0fms", self.camera_id, frame_id, dt * 1000)
-                    if detect.target_present:
-                        logger.info("[%s] target_present=true class=%s bbox=%s", self.camera_id, detect.class_name, detect.target_coordinate)
-                    else:
-                        logger.debug("[%s] target_present=false", self.camera_id)
-
-                    # Build snapshot and update registry
-                    image_b64 = None
-                    tracked_list = []
-                    interactions = []
-                    coord = None
-                    if detect.target_present:
-                        if log_event is not None:
-                            tracked_list = log_event.tracked_list
-                            interactions = log_event.interactions or []
-                            coord = log_event.target_coordinate
-                        else:
-                            coord = detect.target_coordinate
-                    if frame is not None:
-                        image_b64 = self._encode_frame(frame)  # raw frame only; bbox drawn at save time
-
-                    snap = CameraSnapshot(
-                        camera_id=self.camera_id,
-                        target_present=detect.target_present,
-                        timestamp=time.monotonic(),
-                        tracked_list=tracked_list,
-                        interactions=interactions,
-                        image_b64=image_b64,
-                        target_coordinate=coord,
-                    )
-                    if self.orchestrator and detect.target_present:
-                        self.orchestrator.update_snapshot(self.camera_id, snap)
-
-                    # Interaction change → space snapshot
-                    if log_event is not None and self.space_id and self.orchestrator:
-                        self.orchestrator.request_space_snapshot(self.space_id)
-                else:
-                    logger.debug("[%s] frame=%d skipped (interval=%d)", self.camera_id, frame_id, skip_interval)
-                frame_id += 1
-                fps_frame_count += 1
-                now = time.perf_counter()
-                if now - last_fps_log >= fps_log_interval:
-                    fps = fps_frame_count / (now - last_fps_log)
-                    logger.debug("[CAM FPS] %s frame=%d fps=%.1f", self.camera_id, frame_id, fps)
-                    fps_frame_count = 0
-                    last_fps_log = now
-
-            self.pipeline.stop()
-            self.cap.release()
-            self._finished = True
-            logger.info("Camera %s finished", self.camera_id)
-            if self.on_finished:
-                self.on_finished(self.camera_id)
-        except Exception:
-            logger.exception("Camera %s worker crashed", self.camera_id)
-            self.pipeline.stop()
-            self.cap.release()
-            self._finished = True
-            if self.on_finished:
-                self.on_finished(self.camera_id)
-
-
-def _make_pipeline_config(camera: CameraConfig, app_config: AppConfig, default_model_path: str | None = None) -> PipelineConfig:
-    model_path = camera.model_path or default_model_path or f"yolo26{camera.model_size}.pt"
-    yolo = YOLOConfig(
-        conf_threshold=app_config.yolo.conf_threshold,
-        iou_threshold=app_config.yolo.iou_threshold,
-        tile_enabled=app_config.yolo.tile_enabled,
-        tile_grid_x=app_config.yolo.tile_grid_x,
-        tile_grid_y=app_config.yolo.tile_grid_y,
-        tile_overlap=app_config.yolo.tile_overlap,
-        model_size=camera.model_size,
-        model_path=model_path,
-        quantize=camera.quantize,
-        frame_skip=camera.frame_skip,
-    )
-    if camera.interaction_classes is None:
-        yolo.yolo_classes = None
-    else:
-        all_classes = list(dict.fromkeys(camera.target_classes + camera.interaction_classes))
-        yolo.yolo_classes = all_classes if all_classes else None
-    return PipelineConfig(
-        target_classes=camera.target_classes,
-        interaction_classes=camera.interaction_classes,
-        thresholds=app_config.thresholds,
-        yolo=yolo,
-        llm=app_config.llm,
-        llm_system_prompt=camera.llm_system_prompt,
-    )
 
 
 class Orchestrator:
     def __init__(self, app_config: AppConfig, space_logger: Optional[SpaceLogger] = None,
-                 default_model_path: Optional[str] = None, repo=None, event_bus=None):
+                 repo=None, event_bus=None):
         self.app_config = app_config
         self.space_logger = space_logger
-        self._default_model_path = default_model_path
         self._repo = repo
         self._event_bus = event_bus
-        self._workers: Dict[str, _CameraWorker] = {}
         self._lock = threading.Lock()
         self._cam_to_space: Dict[str, str] = _build_cam_to_space(app_config)
         self._collectors: Dict[str, _BatchCollector] = {}
@@ -487,25 +279,17 @@ class Orchestrator:
     @property
     def all_finished(self) -> bool:
         with self._lock:
-            return len(self._workers) == 0 and len(self._collectors) == 0
+            return len(self._collectors) == 0
 
     def start(self):
-        video_cam_ids = [
-            cam.id for cam in self.app_config.cameras
-            if cam.status == "active" and not _is_stream_source(cam.source)
-        ]
-        video_count = len(video_cam_ids)
-        barrier = threading.Barrier(video_count) if video_count > 0 else None
-
         for cam in self.app_config.cameras:
             if cam.status != "active":
                 logger.info("Skipping inactive camera: %s", cam.id)
                 continue
-            self.add_camera(cam, barrier=barrier, loop_count=1)
+            self.add_camera(cam)
 
-        mode = self.app_config.mode
-        logger.debug("[init] MODE=%s space_logger=%r all_spaces=%d", mode, self.space_logger is not None, len(self.app_config.spaces))
-        if mode == "llm_vision" and self.space_logger:
+        logger.debug("[init] space_logger=%r all_spaces=%d", self.space_logger is not None, len(self.app_config.spaces))
+        if self.space_logger:
             self._vision_detector = _SimpleVisionDetector(
                 spaces=self.app_config.spaces,
                 collectors=self._collectors,
@@ -518,88 +302,38 @@ class Orchestrator:
             self._vision_detector.start()
 
     def add_camera(self, camera: CameraConfig, start_event: threading.Event | None = None,
-                    capture_start: float | None = None,
-                    barrier: threading.Barrier | None = None, loop_count: int = 1):
+                    capture_start: float | None = None):
         space_id = self._cam_to_space.get(camera.id)
         stop_event = threading.Event()
-        mode = self.app_config.mode
         rc = self.app_config.reconnect
+        config = self.app_config.llm
 
-        if mode == "llm_vision":
-            from core.vision_worker import _BatchCollector
-            config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
-
-            def _on_collector_finished(cid: str):
-                with self._lock:
-                    self._collectors.pop(cid, None)
-                logger.info("Collector %s removed from orchestrator", cid)
-
-            collector = _BatchCollector(
-                camera_id=camera.id,
-                source=camera.source,
-                stop_event=stop_event,
-                collect_interval=config.llm.collect_interval,
-                collect_count=config.llm.collect_count,
-                vision_quality=config.llm.vision_quality,
-                vision_max_width=config.llm.vision_max_width,
-                on_finished=_on_collector_finished,
-                start_event=start_event,
-                capture_start=capture_start,
-                loop_count=loop_count,
-                barrier=barrier,
-                reconnect=rc,
-            )
+        def _on_collector_finished(cid: str):
             with self._lock:
-                self._collectors[camera.id] = collector
-            collector.start()
-            logger.info("Batch collector %s started (space=%s, mode=%s)", camera.id, space_id, mode)
-            return
-        else:
-            cap = create_capture(camera.source)
-            backoff_delay = rc.base_delay
+                self._collectors.pop(cid, None)
+            logger.info("Collector %s removed from orchestrator", cid)
 
-            while cap is None and _is_stream_source(camera.source):
-                logger.warning("[%s] Cannot open camera, retrying in %.1fs", camera.id, backoff_delay)
-                time.sleep(backoff_delay)
-                try:
-                    cap = create_capture(camera.source)
-                except Exception:
-                    logger.exception("[%s] create_capture failed during initial connect", camera.id)
-                    cap = None
-                if cap is None:
-                    backoff_delay = min(backoff_delay * 2, rc.max_delay)
-
-            if cap is None:
-                logger.error("Cannot open camera %s from %s", camera.id, camera.source)
-                return
-            config = _make_pipeline_config(camera, self.app_config, self._default_model_path)
-            pipeline = Pipeline(config, camera.id)
-            worker = _CameraWorker(
-                camera.id, pipeline, cap, camera.source, stop_event, camera.frame_skip,
-                on_finished=self.worker_finished,
-                orchestrator=self,
-                space_id=space_id,
-                vision_enabled=self.app_config.llm.vision_enabled,
-                reconnect=rc,
-            )
-            with self._lock:
-                self._workers[camera.id] = worker
-            worker.start()
-            logger.info("Camera %s started (%s, space=%s, mode=%s)", camera.id, camera.source, space_id, mode)
-            if self._event_bus:
-                self._event_bus.publish({"type": "camera.added", "data": {"camera_id": camera.id}})
-
-    def worker_finished(self, camera_id: str):
+        collector = _BatchCollector(
+            camera_id=camera.id,
+            source=camera.source,
+            stop_event=stop_event,
+            collect_interval=config.collect_interval,
+            collect_count=config.collect_count,
+            vision_quality=config.vision_quality,
+            vision_max_width=config.vision_max_width,
+            on_finished=_on_collector_finished,
+            start_event=start_event,
+            capture_start=capture_start,
+            reconnect=rc,
+        )
         with self._lock:
-            self._workers.pop(camera_id, None)
-        logger.info("Worker %s removed from orchestrator (%d remaining)", camera_id, len(self._workers))
+            self._collectors[camera.id] = collector
+        collector.start()
+        logger.info("Batch collector %s started (space=%s)", camera.id, space_id)
 
     def remove_camera(self, camera_id: str):
         with self._lock:
-            worker = self._workers.pop(camera_id, None)
             collector = self._collectors.pop(camera_id, None)
-        if worker:
-            worker.stop()
         if collector:
             collector.stop()
         self._cam_to_space.pop(camera_id, None)
@@ -613,10 +347,7 @@ class Orchestrator:
         with self._snapshot_lock:
             self._snapshots.pop(camera_id, None)
         with self._lock:
-            worker = self._workers.pop(camera_id, None)
             collector = self._collectors.pop(camera_id, None)
-        if worker:
-            worker.stop()
         if collector:
             collector.stop()
         cam = next((c for c in self.app_config.cameras if c.id == camera_id), None)
@@ -634,13 +365,9 @@ class Orchestrator:
             self._vision_detector.stop()
         with self._lock:
             collectors = list(self._collectors.values())
-            workers = list(self._workers.values())
         for c in collectors:
             c.stop()
-        for w in workers:
-            w.stop()
         self._collectors.clear()
-        self._workers.clear()
         logger.info("All cameras stopped")
 
 

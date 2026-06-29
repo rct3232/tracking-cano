@@ -34,6 +34,7 @@ class LogEntry(Base):
     description = Column(Text, nullable=True)
     target_coordinate = Column(Text, nullable=True)
     raw_json = Column(Text, nullable=True)
+    image_path = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
 
@@ -41,7 +42,7 @@ class AppSetting(Base):
     __tablename__ = "app_settings"
 
     key = Column(Text, primary_key=True)
-    key_prefix = Column(Text, nullable=False)
+    key_prefix = Column(Text, nullable=False, primary_key=True)
     value_text = Column(Text, nullable=True)
     value_number = Column(Numeric(asdecimal=False), nullable=True)
     value_bool = Column(Boolean, nullable=True)

@@ -9,7 +9,7 @@ import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileModifiedEvent
 
-from settings import LLMConfig, LogConfig, ReconnectConfig, Thresholds, YOLOConfig
+from settings import LLMConfig, LogConfig, ReconnectConfig
 
 # ── DB Loading ───────────────────────────────────────────────────────
 
@@ -17,8 +17,6 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
     """DB에서 설정 로드 → AppConfig 반환."""
     raw = repo.get_full_config()
 
-    thresholds = Thresholds.from_dict(raw["thresholds"])
-    yolo = YOLOConfig.from_dict(raw["yolo"])
     llm = LLMConfig.from_dict(raw["llm"])
     # 12-factor: env override for secrets
     if llm_key:
@@ -27,7 +25,7 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
     log = LogConfig(db_url=db_url)
     reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
 
-    mode = raw.get("mode", "cv_pipeline") or "cv_pipeline"
+    mode = raw.get("mode", "llm_vision") or "llm_vision"
 
     cameras = _validate_camera_list(raw["cameras"])
     spaces = [SpaceConfig(s) for s in raw["spaces"]]
@@ -38,10 +36,10 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
         len(spaces),
         mode,
     )
-    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode, reconnect)
+    return AppConfig(cameras, spaces, llm, log, mode, reconnect)
+
 
 logger = logging.getLogger(__name__)
-
 # ── Data structures ────────────────────────────────────────────────
 
 class CameraConfig:
@@ -55,11 +53,6 @@ class CameraConfig:
         if not target:
             raise ValueError(f"Camera '{cfg['id']}': 'target_classes' is required")
         self.target_classes: List[str] = target
-        self.interaction_classes: Optional[List[str]] = cfg.get("interaction_classes", None)
-        self.model_size: str = cfg.get("model_size", "s")
-        self.model_path: Optional[str] = cfg.get("model_path", None)
-        self.quantize: bool = cfg.get("quantize", False)
-        self.frame_skip: int = cfg.get("frame_skip", 0)
         self.llm_system_prompt: Optional[str] = cfg.get("llm_system_prompt", None)
 
     def __repr__(self) -> str:
@@ -86,17 +79,13 @@ class AppConfig:
         self,
         cameras: List[CameraConfig],
         spaces: List[SpaceConfig],
-        thresholds: Thresholds,
-        yolo: YOLOConfig,
         llm: LLMConfig,
         log: LogConfig,
-        mode: str = "cv_pipeline",
+        mode: str = "llm_vision",
         reconnect: ReconnectConfig | None = None,
     ):
         self.cameras = cameras
         self.spaces = spaces
-        self.thresholds = thresholds
-        self.yolo = yolo
         self.llm = llm
         self.log = log
         self.mode = mode
@@ -117,12 +106,10 @@ def load_config(
     """
     raw = _read_yaml(config_path)
 
-    thresholds = Thresholds.from_dict(raw.get("thresholds", {}))
-    yolo = YOLOConfig.from_dict(raw.get("yolo", {}))
     llm = LLMConfig.from_dict(raw.get("llm", {}))
     log = LogConfig.from_dict(raw.get("logging", {}))
     reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
-    mode = raw.get("mode", "cv_pipeline")
+    mode = raw.get("mode", "llm_vision")
 
     # 12-factor: env overrides for secrets / deployment-specific values
     llm.api_key = os.environ.get("LLM_KEY", llm.api_key)
@@ -138,7 +125,7 @@ def load_config(
         len(spaces),
         mode,
     )
-    return AppConfig(cameras, spaces, thresholds, yolo, llm, log, mode, reconnect)
+    return AppConfig(cameras, spaces, llm, log, mode, reconnect)
 
 
 def _read_yaml(path: str) -> Dict[str, Any]:

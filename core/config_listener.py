@@ -102,11 +102,8 @@ class ConfigListener:
                 apply_config_changes(self._orchestrator, self._space_logger, new_cfg)
             else:
                 # 값 변경 (thresholds/yolo/llm/camera 내부) 감지
-                if old_cfg.thresholds != new_cfg.thresholds or \
-                   old_cfg.yolo != new_cfg.yolo or \
-                   old_cfg.llm != new_cfg.llm or \
-                   old_cfg.reconnect != new_cfg.reconnect or \
-                   old_cfg.mode != new_cfg.mode:
+                if old_cfg.llm != new_cfg.llm or \
+                   old_cfg.reconnect != new_cfg.reconnect:
                     logger.info("Global config value change detected")
                     apply_config_changes(self._orchestrator, self._space_logger, new_cfg)
 

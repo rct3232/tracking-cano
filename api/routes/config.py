@@ -5,7 +5,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.auth import verify_token
-from api.models import LLMUpdate, ThresholdsUpdate, YOLOUpdate
+from api.models import LLMUpdate
 from core.yaml_writer import (
     read_yaml,
     update_yaml_config_section,
@@ -34,53 +34,12 @@ async def get_config(_: str = Depends(verify_token)) -> Dict[str, Any]:
         # Flatten to YAML-like structure for API response
         return {
             "mode": raw["mode"],
-            "thresholds": raw["thresholds"],
-            "yolo": raw["yolo"],
             "llm": {**raw["llm"]},  # exclude api_key from response
             "cameras": raw["cameras"],
             "spaces": raw["spaces"],
         }
     return read_yaml()
 
-
-@router.put("/thresholds")
-async def update_thresholds(body: ThresholdsUpdate, _: str = Depends(verify_token)) -> Dict[str, Any]:
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
-
-    orch = _get_orchestrator()
-    if _is_db_mode():
-        repo = orch._config_repo
-        repo.patch_thresholds(updates)
-        from core.config_applier import apply_config_changes
-        from core.config_manager import load_from_db
-        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
-        apply_config_changes(orch, orch.space_logger, new_cfg)
-    else:
-        update_yaml_config_section("thresholds", updates)
-
-    return {"status": "ok"}
-
-
-@router.put("/yolo")
-async def update_yolo(body: YOLOUpdate, _: str = Depends(verify_token)) -> Dict[str, Any]:
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
-
-    orch = _get_orchestrator()
-    if _is_db_mode():
-        repo = orch._config_repo
-        repo.patch_yolo(updates)
-        from core.config_applier import apply_config_changes
-        from core.config_manager import load_from_db
-        new_cfg = load_from_db(repo, llm_key=orch.app_config.llm.api_key)
-        apply_config_changes(orch, orch.space_logger, new_cfg)
-    else:
-        update_yaml_config_section("yolo", updates)
-
-    return {"status": "ok"}
 
 
 @router.put("/llm")

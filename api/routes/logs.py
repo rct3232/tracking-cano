@@ -2,9 +2,11 @@
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sse_starlette.sse import EventSourceResponse
 
 from api.auth import verify_token
@@ -109,6 +111,40 @@ async def get_log(log_id: int, _: str = Depends(verify_token)) -> LogEntryRespon
     return _to_response(entry)
 
 
+@router.get("/{log_id}/image")
+async def get_log_image(log_id: int, _: str = Depends(verify_token)):
+    from api.server import _space_logger
+
+    repo = _get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    from storage.database import LogEntry
+    with repo._session_factory() as session:
+        entry = session.query(LogEntry).filter(LogEntry.id == log_id).first()
+
+    if not entry or not entry.image_path:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    path = entry.image_path
+
+    local_path = Path("output") / path
+    if local_path.exists():
+        return Response(content=local_path.read_bytes(), media_type="image/jpeg")
+
+    if _space_logger and _space_logger._minio:
+        try:
+            response = _space_logger._minio.get_object(_space_logger._minio_config.bucket, path)
+            data = response.read()
+            response.close()
+            response.release_conn()
+            return Response(content=data, media_type="image/jpeg")
+        except Exception:
+            pass
+
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
 def _to_response(entry) -> LogEntryResponse:
     return LogEntryResponse(
         id=entry.id,
@@ -118,6 +154,7 @@ def _to_response(entry) -> LogEntryResponse:
         target_present=entry.target_present,
         description=entry.description,
         target_coordinate=entry.target_coordinate,
+        image_url=f"/api/logs/{entry.id}/image" if entry.image_path else None,
     )
 
 

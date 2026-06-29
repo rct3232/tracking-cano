@@ -38,20 +38,13 @@ async def list_cameras(_: str = Depends(verify_token)) -> List[CameraResponse]:
 
     resp = []
     for cam in orch.app_config.cameras:
-        worker_state = "stopped"
-        if cam.id in orch._workers:
-            worker_state = "running"
-        elif cam.id in orch._collectors:
-            worker_state = "collector"
+        worker_state = "collector" if cam.id in orch._collectors else "stopped"
 
         resp.append(CameraResponse(
             id=cam.id,
             source=cam.source,
             status=cam.status,
             target_classes=cam.target_classes,
-            interaction_classes=cam.interaction_classes,
-            model_size=cam.model_size,
-            frame_skip=cam.frame_skip,
             worker_state=worker_state,
         ))
     return resp
@@ -67,20 +60,13 @@ async def get_camera(camera_id: str, _: str = Depends(verify_token)) -> CameraRe
     if not cam:
         raise HTTPException(status_code=404, detail=f"Camera {camera_id} not found")
 
-    worker_state = "stopped"
-    if camera_id in orch._workers:
-        worker_state = "running"
-    elif camera_id in orch._collectors:
-        worker_state = "collector"
+    worker_state = "collector" if camera_id in orch._collectors else "stopped"
 
     return CameraResponse(
         id=cam.id,
         source=cam.source,
         status=cam.status,
         target_classes=cam.target_classes,
-        interaction_classes=cam.interaction_classes,
-        model_size=cam.model_size,
-        frame_skip=cam.frame_skip,
         worker_state=worker_state,
     )
 
@@ -120,17 +106,15 @@ async def update_camera(
         if not updates:
             return CameraResponse(
                 id=cam.id, source=cam.source, status=cam.status,
-                target_classes=cam.target_classes, interaction_classes=cam.interaction_classes,
-                model_size=cam.model_size, frame_skip=cam.frame_skip, worker_state="unknown",
+                target_classes=cam.target_classes, worker_state="unknown",
             )
 
         # Merge updates into camera dict
-        cam_dict = {
-            "id": cam.id, "source": cam.source, "status": cam.status,
-            "target_classes": cam.target_classes, "interaction_classes": cam.interaction_classes,
-            "model_size": cam.model_size, "frame_skip": cam.frame_skip,
-            "quantize": cam.quantize, "llm_system_prompt": cam.llm_system_prompt,
-        }
+            cam_dict = {
+                "id": cam.id, "source": cam.source, "status": cam.status,
+                "target_classes": cam.target_classes,
+                "llm_system_prompt": cam.llm_system_prompt,
+            }
         cam_dict.update(updates)
 
         repo = orch._config_repo

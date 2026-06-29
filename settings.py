@@ -3,42 +3,6 @@ from typing import List, Optional
 
 
 @dataclass
-class Thresholds:
-    speed_slow: float = 20.0
-    speed_fast: float = 40.0
-    overlap: float = 0.3
-    distance: float = 50.0
-    dash_threshold: float = 15.0
-    rotation_threshold: float = 45.0
-    hysteresis: float = 5.0
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'Thresholds':
-        valid = {k: v for k, v in d.items() if k in cls.__annotations__}
-        return cls(**valid)
-
-
-@dataclass
-class YOLOConfig:
-    model_size: str = "s"
-    model_path: Optional[str] = None
-    quantize: bool = False
-    frame_skip: int = 0
-    conf_threshold: float = 0.25
-    iou_threshold: float = 0.70
-    yolo_classes: Optional[List[str]] = None
-    tile_grid_x: int = 2
-    tile_grid_y: int = 2
-    tile_overlap: int = 20
-    tile_enabled: bool = False
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'YOLOConfig':
-        valid = {k: v for k, v in d.items() if k in cls.__annotations__}
-        return cls(**valid)
-
-
-@dataclass
 class LLMConfig:
     api_base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
@@ -54,6 +18,7 @@ class LLMConfig:
     cooldown_seconds: float = 30.0
     early_trigger: float = 5.0
     json_response_format: bool = True
+    log_language: str = "en"
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LLMConfig':
@@ -127,11 +92,4 @@ class ReconnectConfig:
         return cls(**valid)
 
 
-@dataclass
-class PipelineConfig:
-    target_classes: List[str] = field(default_factory=lambda: ["cat"])
-    interaction_classes: Optional[List[str]] = None
-    thresholds: Thresholds = field(default_factory=Thresholds)
-    yolo: YOLOConfig = field(default_factory=YOLOConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
-    llm_system_prompt: Optional[str] = None
+

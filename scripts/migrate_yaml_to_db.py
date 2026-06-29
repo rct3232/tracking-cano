@@ -29,22 +29,6 @@ def migrate():
     repo.save_mode(app_config.mode)
     print(f"  mode: {app_config.mode}")
 
-    # thresholds (all numeric)
-    for k, v in app_config.thresholds.__dict__.items():
-        repo.patch_thresholds({k: v})
-    print(f"  thresholds: {len(app_config.thresholds.__dict__)} fields")
-
-    # yolo (mixed type)
-    yolo_updates = {}
-    for k, v in app_config.yolo.__dict__.items():
-        if isinstance(v, bool):
-            repo.patch_yolo({k: v})
-        elif isinstance(v, (int, float)):
-            repo.patch_yolo({k: v})
-        else:
-            repo.patch_yolo({k: str(v)})
-    print(f"  yolo: {len(app_config.yolo.__dict__)} fields")
-
     # llm (api_key 제외 — env var 전용)
     for k, v in app_config.llm.__dict__.items():
         if k == "api_key":
@@ -64,10 +48,6 @@ def migrate():
             "source": cam.source,
             "status": cam.status,
             "target_classes": cam.target_classes,
-            "interaction_classes": cam.interaction_classes,
-            "model_size": cam.model_size,
-            "frame_skip": cam.frame_skip,
-            "quantize": cam.quantize,
             "llm_system_prompt": cam.llm_system_prompt,
         }
         repo.save_camera(cam.id, data)

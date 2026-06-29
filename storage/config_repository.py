@@ -26,8 +26,6 @@ class ConfigRepository:
         """prefix별 배치 조회 → flat config dict 반환."""
         result = {
             "mode": "",
-            "thresholds": {},
-            "yolo": {},
             "llm": {},
             "cameras": [],
             "spaces": [],
@@ -37,7 +35,7 @@ class ConfigRepository:
             result["reconnect"] = {}
 
             # prefix별 조회 (INDEX SCAN)
-            for prefix in ("mode", "thresholds", "yolo", "llm", "reconnect"):
+            for prefix in ("mode", "llm", "reconnect"):
                 rows = session.query(AppSetting).filter(
                     AppSetting.key_prefix == prefix
                 ).all()
@@ -45,12 +43,12 @@ class ConfigRepository:
                 if prefix == "mode":
                     row = rows[0] if rows else None
                     result["mode"] = row.value_text or "" if row else ""
-                elif prefix in ("thresholds", "reconnect"):
-                    # thresholds / reconnect — 모두 numeric
+                elif prefix == "reconnect":
+                    # reconnect — 모두 numeric
                     for r in rows:
                         result[prefix][r.key] = float(r.value_number) if r.value_number is not None else None
                 else:
-                    # yolo / llm — mixed type
+                    # llm — mixed type
                     for r in rows:
                         val = self._resolve_value(r)
                         result[prefix][r.key] = val
@@ -74,34 +72,6 @@ class ConfigRepository:
         return result
 
     # ─────────────────────── 쓰기 ────────────────────────
-
-    def patch_thresholds(self, updates: dict) -> None:
-        """thresholds 개별 필드 업데이트 (value_number)."""
-        with self._session_factory() as session:
-            for k, v in updates.items():
-                row = session.query(AppSetting).filter(
-                    AppSetting.key_prefix == "thresholds",
-                    AppSetting.key == k,
-                ).first()
-                if row:
-                    row.value_number = float(v)
-                else:
-                    session.add(AppSetting(key=k, key_prefix="thresholds", value_number=float(v)))
-            self._increment_version(session)
-
-    def patch_yolo(self, updates: dict) -> None:
-        """yolo 개별 필드 업데이트 (mixed type)."""
-        with self._session_factory() as session:
-            for k, v in updates.items():
-                row = session.query(AppSetting).filter(
-                    AppSetting.key_prefix == "yolo",
-                    AppSetting.key == k,
-                ).first()
-                if row is None:
-                    row = AppSetting(key=k, key_prefix="yolo")
-                    session.add(row)
-                self._set_value(row, v)
-            self._increment_version(session)
 
     def patch_llm(self, updates: dict) -> None:
         """llm 개별 필드 업데이트 (mixed type)."""
