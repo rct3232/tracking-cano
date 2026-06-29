@@ -10,13 +10,9 @@ class LLMConfig:
     vision_enabled: bool = True
     vision_quality: int = 60
     vision_max_width: int = 1024
-    snapshot_count: int = 5
-    snapshot_interval: float = 30.0
     collect_interval: float = 0.5
     collect_count: int = 5
     max_stale_threshold: float = 10.0
-    cooldown_seconds: float = 30.0
-    early_trigger: float = 5.0
     json_response_format: bool = True
     log_language: str = "en"
 

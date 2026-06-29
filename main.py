@@ -138,7 +138,6 @@ def main():
 
     log_config = app_config.log
     setup_logging(log_config.log_dir)
-    logger.info("Running in mode: %s", app_config.mode)
 
     if repo:
         logger.info("Log DB: %s", log_config.db_url)

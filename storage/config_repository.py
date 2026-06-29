@@ -25,7 +25,6 @@ class ConfigRepository:
     def get_full_config(self) -> dict:
         """prefix별 배치 조회 → flat config dict 반환."""
         result = {
-            "mode": "",
             "llm": {},
             "cameras": [],
             "spaces": [],
@@ -35,15 +34,12 @@ class ConfigRepository:
             result["reconnect"] = {}
 
             # prefix별 조회 (INDEX SCAN)
-            for prefix in ("mode", "llm", "reconnect"):
+            for prefix in ("llm", "reconnect"):
                 rows = session.query(AppSetting).filter(
                     AppSetting.key_prefix == prefix
                 ).all()
 
-                if prefix == "mode":
-                    row = rows[0] if rows else None
-                    result["mode"] = row.value_text or "" if row else ""
-                elif prefix == "reconnect":
+                if prefix == "reconnect":
                     # reconnect — 모두 numeric
                     for r in rows:
                         result[prefix][r.key] = float(r.value_number) if r.value_number is not None else None
@@ -129,19 +125,7 @@ class ConfigRepository:
             ).delete(synchronize_session="fetch")
             self._increment_version(session)
 
-    def save_mode(self, mode: str) -> None:
-        with self._session_factory() as session:
-            row = session.query(AppSetting).filter(
-                AppSetting.key_prefix == "mode",
-                AppSetting.key == "mode",
-            ).first()
-            if row is None:
-                row = AppSetting(key="mode", key_prefix="mode")
-                session.add(row)
-            row.value_text = mode
-            self._increment_version(session)
-
-    # ─────────────────────── 내부 ────────────────────────
+   # ─────────────────────── 내부 ────────────────────────
 
     @staticmethod
     def _resolve_value(setting: AppSetting):

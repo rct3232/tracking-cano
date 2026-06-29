@@ -25,18 +25,15 @@ def load_from_db(repo, llm_key: str = "") -> "AppConfig":
     log = LogConfig(db_url=db_url)
     reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
 
-    mode = raw.get("mode", "llm_vision") or "llm_vision"
-
     cameras = _validate_camera_list(raw["cameras"])
     spaces = [SpaceConfig(s) for s in raw["spaces"]]
 
     logger.info(
-        "Config loaded from DB: %d cameras, %d spaces, mode=%s",
+        "Config loaded from DB: %d cameras, %d spaces",
         len(cameras),
         len(spaces),
-        mode,
     )
-    return AppConfig(cameras, spaces, llm, log, mode, reconnect)
+    return AppConfig(cameras, spaces, llm, log, reconnect)
 
 
 logger = logging.getLogger(__name__)
@@ -81,14 +78,12 @@ class AppConfig:
         spaces: List[SpaceConfig],
         llm: LLMConfig,
         log: LogConfig,
-        mode: str = "llm_vision",
         reconnect: ReconnectConfig | None = None,
     ):
         self.cameras = cameras
         self.spaces = spaces
         self.llm = llm
         self.log = log
-        self.mode = mode
         self.reconnect = reconnect or ReconnectConfig()
 
 # ── Loading ────────────────────────────────────────────────────────
@@ -109,7 +104,6 @@ def load_config(
     llm = LLMConfig.from_dict(raw.get("llm", {}))
     log = LogConfig.from_dict(raw.get("logging", {}))
     reconnect = ReconnectConfig.from_dict(raw.get("reconnect", {}))
-    mode = raw.get("mode", "llm_vision")
 
     # 12-factor: env overrides for secrets / deployment-specific values
     llm.api_key = os.environ.get("LLM_KEY", llm.api_key)
@@ -120,12 +114,11 @@ def load_config(
     spaces = _parse_spaces(raw)
 
     logger.info(
-        "Config loaded: %d cameras, %d spaces, mode=%s",
+        "Config loaded: %d cameras, %d spaces",
         len(cameras),
         len(spaces),
-        mode,
     )
-    return AppConfig(cameras, spaces, llm, log, mode, reconnect)
+    return AppConfig(cameras, spaces, llm, log, reconnect)
 
 
 def _read_yaml(path: str) -> Dict[str, Any]:

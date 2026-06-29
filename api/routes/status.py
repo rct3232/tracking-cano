@@ -52,7 +52,6 @@ async def status(_: str = Depends(verify_token)) -> SystemStatus:
             ))
 
     return SystemStatus(
-        mode=_orchestrator.app_config.mode if _orchestrator else "unknown",
         cameras=cameras_resp,
         spaces=spaces_resp,
         uptime_seconds=time.monotonic(),  # Approximate; main.py could inject real start time

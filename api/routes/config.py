@@ -33,7 +33,6 @@ async def get_config(_: str = Depends(verify_token)) -> Dict[str, Any]:
         raw = repo.get_full_config()
         # Flatten to YAML-like structure for API response
         return {
-            "mode": raw["mode"],
             "llm": {**raw["llm"]},  # exclude api_key from response
             "cameras": raw["cameras"],
             "spaces": raw["spaces"],

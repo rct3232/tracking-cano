@@ -88,7 +88,6 @@ class LLMUpdate(BaseModel):
 # ── Status ────────────────────────────────────────────────────────
 
 class SystemStatus(BaseModel):
-    mode: str
     cameras: List[CameraResponse]
     spaces: List[SpaceResponse]
     uptime_seconds: float

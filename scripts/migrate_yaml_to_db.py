@@ -25,10 +25,6 @@ def migrate():
     repo = ConfigRepository(Session, db_url)
     app_config = load_config("configuration.yaml")
 
-    # mode
-    repo.save_mode(app_config.mode)
-    print(f"  mode: {app_config.mode}")
-
     # llm (api_key 제외 — env var 전용)
     for k, v in app_config.llm.__dict__.items():
         if k == "api_key":
