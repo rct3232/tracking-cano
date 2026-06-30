@@ -33,7 +33,6 @@ LLM Vision을 이용해 IP 카메라(RTSP/MP4) 영상에서 지정한 객체를 
 │   /api/health    /api/status   /api/logs/stream (SSE)              │
 └──────────────────────────────────────────────────────────────────────┘
 ```
-```
 
 ---
 
@@ -73,26 +72,7 @@ cp .env.example .env                               # LLM API key 입력
 docker compose up --build
 ```
 
-## Quick Start (로컬)
-
-```bash
-# 의존성 설치
-pip install -r requirements.txt
-
-# 설정 파일 준비
-cp configuration.yaml.example configuration.yaml   # RTSP URL 등 실제 값으로 수정
-cp .env.example .env                               # LLM API key 입력
-
-# 실시간 모션 모드
-python main.py --live
-
-# 오프라인 영상 분석
-python main.py --video ./sample.mp4
-```
-
----
-
-## Configuration (로컬 실행 시)
+## Configuration
 
 ### `configuration.yaml` — 전체 설정 파일 (`.gitignore` 제외)
 
@@ -126,11 +106,18 @@ LLM_KEY=your_llm_api_key_here
 
 ## Usage
 
+```bash
+# 기본 실행 (Docker 권장)
+docker compose up --build
+
+# DEBUG 로깅 활성화
+docker run --rm -e LOG_LEVEL=DEBUG tracking-cano python main.py --verbose
+```
+
 | 옵션 | 설명 |
 |------|------|
-| `--live` | 실시간 모션 모드 (구성 파일 기반) |
-| `--video <path>` | 오프라인 영상 분석 |
 | `--config <path>` | 구성 파일 경로 (기본: `configuration.yaml`) |
+| `--verbose` / `-v` | DEBUG 레벨 로깅 활성화 |
 
 ---
 
@@ -152,8 +139,6 @@ curl "http://localhost:8000/api/logs/?subject_id=livingroom"
 curl -N http://localhost:8000/api/logs/stream
 ```
 
-전체 API 명세는 [docs/api_reference.md](docs/api_reference.md)를 참조하세요.
-
 Swagger UI: http://localhost:8000/docs
 
 ---
@@ -165,13 +150,8 @@ Swagger UI: http://localhost:8000/docs
 `main.py`에 `--verbose`를 추가하면 모든 모듈의 **DEBUG 레벨 로그**가 `docker logs`(또는 stdout/stderr)로 출력됩니다.
 
 ```bash
-# Docker (multi-camera 모드)
-docker run --rm --network host \
-  -v ./config:/app/config:ro -v ./logs:/app/logs -v ./.env:/app/.env:ro \
-  tracking-cano python main.py --live --verbose
-
-# 로컬 (single-live 모드)
-python main.py --live rtsp://... --verbose
+# Docker DEBUG 모드로 실행
+docker run --rm -e LOG_LEVEL=DEBUG tracking-cano python main.py --verbose
 ```
 
 ### DEBUG 로그 종류
@@ -205,10 +185,12 @@ tracking-cano/
 ├── settings.py                      # LLMConfig/LogConfig/MinIOConfig/ReconnectConfig dataclasses
 ├── core/
 │   ├── __init__.py
-│   ├── config_manager.py            # YAML 읽기 + 핫리로드(diff_configs)
+│   ├── config_manager.py            # YAML/DB 로딩 + 핫리로드(diff_configs)
+│   ├── config_applier.py            # 구조적 변경 적용 + 값 변경 시 카메라 재시작
+│   ├── config_listener.py           # PostgreSQL LISTEN/NOTIFY + polling 폴백
 │   ├── orchestrator.py              # 다중 카메라 오케스트레이션 + snapshot 관리
 │   ├── vision_worker.py             # _BatchCollector (LLM vision 전용 timer capture)
-│   └── yaml_writer.py               # YAML 쓰기 (REST API → config)
+│   └── yaml_writer.py               # 원자적 YAML 읽기/쓰기 (REST API → config)
 ├── nlp/
 │   ├── __init__.py
 │   ├── logger.py                    # SpaceLogger + LLMCallDebouncer + snapshot 관리
@@ -228,12 +210,15 @@ tracking-cano/
 │       └── config.py                # 설정 읽기/쓰기
 ├── storage/
 │   ├── __init__.py
-│   ├── database.py                  # SQLAlchemy engine + LogEntry 모델
-│   └── repository.py                # LogRepository.save() 추상화
+│   ├── database.py                  # SQLAlchemy engine, LogEntry/AppSetting/ConfigVersion 모델
+│   ├── repository.py                # LogRepository.save() 추상화
+│   └── config_repository.py         # DB 설정 저장/조회 (PostgreSQL 전용)
 ├── utils/
 │   ├── __init__.py
-│   ├── video.py                     # create_capture(), resolve_source()
+│   ├── video.py                     # create_capture()
 │   └── image.py                     # draw_normalized_bbox()
+├── scripts/
+│   └── migrate_yaml_to_db.py        # YAML → DB 마이그레이션 스크립트
 ├── logs/                            # 로그/DB 디렉토리 (Docker volume)
 ├── output/                          # 스냅샷 이미지 저장 (Docker volume)
 ├── .env                             # 민감 정보 (gitignore)
@@ -247,4 +232,4 @@ tracking-cano/
 
 ## License
 
-[AGPL-3.0](LICENSE)
+AGPL-3.0
