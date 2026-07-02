@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from sse_starlette.sse import EventSourceResponse
 
 from api.auth import verify_token
-from api.models import LogEntryResponse
+from api.models import LogEntryResponse, LogLabelUpdate
 
 router = APIRouter()
 
@@ -145,6 +145,33 @@ async def get_log_image(log_id: int, _: str = Depends(verify_token)):
     raise HTTPException(status_code=404, detail="Image not found")
 
 
+@router.patch("/{log_id}/label", response_model=LogEntryResponse)
+async def patch_log_label(
+    log_id: int,
+    body: LogLabelUpdate,
+    _: str = Depends(verify_token),
+) -> LogEntryResponse:
+    repo = _get_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    from storage.database import LogEntry
+    with repo._session_factory() as session:
+        entry = session.query(LogEntry).filter(LogEntry.id == log_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Log entry not found")
+
+        if body.is_false_positive is not None:
+            entry.is_false_positive = body.is_false_positive
+        if body.is_false_negative is not None:
+            entry.is_false_negative = body.is_false_negative
+
+        session.add(entry)
+        session.commit()
+
+    return _to_response(entry)
+
+
 def _to_response(entry) -> LogEntryResponse:
     return LogEntryResponse(
         id=entry.id,
@@ -154,7 +181,10 @@ def _to_response(entry) -> LogEntryResponse:
         target_present=entry.target_present,
         description=entry.description,
         target_coordinate=entry.target_coordinate,
+        visual_evidence=getattr(entry, 'visual_evidence', None),
         image_url=f"/api/logs/{entry.id}/image" if entry.image_path else None,
+        is_false_positive=getattr(entry, 'is_false_positive', False),
+        is_false_negative=getattr(entry, 'is_false_negative', False),
     )
 
 

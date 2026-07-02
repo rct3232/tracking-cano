@@ -179,7 +179,8 @@ class SpaceLogger:
                    batch_id: str = "", subject_id: str | None = None,
                    target_present: bool | None = None,
                    description: str | None = None, target_coordinate: list | None = None,
-                   raw_json: str | None = None, image_path: str | None = None):
+                   raw_json: str | None = None, image_path: str | None = None,
+                   visual_evidence: list | None = None):
         if self._repo is None:
             return
         import json as _json
@@ -197,6 +198,7 @@ class SpaceLogger:
             target_coordinate=_json.dumps(target_coordinate) if target_coordinate is not None else None,
             raw_json=raw_json,
             image_path=image_path,
+            visual_evidence=_json.dumps(visual_evidence) if visual_evidence is not None else None,
             created_at=datetime.now(timezone.utc),
         )
         self._repo.save(entry)
@@ -429,6 +431,7 @@ class SpaceLogger:
         per_camera_present: List[bool] = []
         for cam_id, snap in snapshots.items():
             class_name: str = ""
+            visual_evidence: list | None = None
             if cam_id in cameras_resp:
                 cam_resp = cameras_resp[cam_id]
                 if isinstance(cam_resp, str):
@@ -438,6 +441,7 @@ class SpaceLogger:
                 elif isinstance(cam_resp, dict):
                     desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
                     class_name = cam_resp.get("class_name", "") or ""
+                    visual_evidence = cam_resp.get("visual_evidence", None)
                     raw_coord = cam_resp.get("target_coordinate")
                     if raw_coord and len(raw_coord) == 4:
                         coord = [raw_coord[1] / 1000.0, raw_coord[0] / 1000.0, raw_coord[3] / 1000.0, raw_coord[2] / 1000.0]
@@ -469,6 +473,7 @@ class SpaceLogger:
                 description=desc,
                 target_coordinate=coord,
                 image_path=img_path,
+                visual_evidence=visual_evidence,
             )
 
         target_present_all = any(per_camera_present)

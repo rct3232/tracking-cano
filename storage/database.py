@@ -33,6 +33,9 @@ class LogEntry(Base):
     target_present = Column(Boolean, nullable=True)
     description = Column(Text, nullable=True)
     target_coordinate = Column(Text, nullable=True)
+    visual_evidence = Column(Text, nullable=True)  # JSON array string: '["귀", "눈"]'
+    is_false_positive = Column(Boolean, default=False)
+    is_false_negative = Column(Boolean, default=False)
     raw_json = Column(Text, nullable=True)
     image_path = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)

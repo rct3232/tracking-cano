@@ -62,6 +62,11 @@ class LogQuery(BaseModel):
     offset: int = 0
 
 
+class LogLabelUpdate(BaseModel):
+    is_false_positive: Optional[bool] = None
+    is_false_negative: Optional[bool] = None
+
+
 class LogEntryResponse(BaseModel):
     id: int
     timestamp: datetime
@@ -70,7 +75,10 @@ class LogEntryResponse(BaseModel):
     target_present: Optional[bool] = None
     description: Optional[str] = None
     target_coordinate: Optional[str] = None
+    visual_evidence: Optional[str] = None
     image_url: Optional[str] = None
+    is_false_positive: bool = False
+    is_false_negative: bool = False
 
 
 # ── Config ────────────────────────────────────────────────────────
