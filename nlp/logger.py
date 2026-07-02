@@ -286,7 +286,6 @@ class SpaceLogger:
             kwargs = dict(
                 model=self.config.model_name,
                 messages=messages,
-                max_tokens=512,
             )
             if self.config.json_response_format:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -391,7 +390,6 @@ class SpaceLogger:
             response_kwargs = {
                 "model": self.config.model_name,
                 "messages": _msgs,
-                "max_tokens": 2048,
             }
             if self.config.json_response_format:
                 response_kwargs["response_format"] = {"type": "json_object"}
