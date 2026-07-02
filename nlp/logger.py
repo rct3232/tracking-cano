@@ -267,17 +267,18 @@ class SpaceLogger:
             return None
 
         target_label = target_classes[0] if target_classes else "target"
-        # Single-stage: direct target detection
-        combined_system = DETECT_SYSTEM_PROMPT.format(target_label=target_label)
+        language_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
+        combined_system = DETECT_SYSTEM_PROMPT.format(
+            target_label=target_label,
+            language_name=language_name,
+        )
         if llm_system_prompt:
-            combined_system = combined_system + "\n\n" + llm_system_prompt
-        lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
-        combined_system += f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
+            combined_system += "\n\n" + llm_system_prompt
         messages = [{"role": "system", "content": combined_system}]
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Look at this image carefully. Is there a {target_label} present in this scene? If you see one, report it even if it is small or partially hidden.\n\nAnswer in JSON only in {lang_name}:\n{{\"target_present\": true/false, \"reasoning\": \"reason\"}}"},
+                {"type": "text", "text": f"Look at this image carefully.\n\nReturn JSON only.\n\n{{\n  \"target_present\": true/false,\n  \"visual_evidence\": [\n    \"...\"\n  ]\n}}"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
             ],
         })
@@ -290,7 +291,7 @@ class SpaceLogger:
             if self.config.json_response_format:
                 kwargs["response_format"] = {"type": "json_object"}
             r = self.client.chat.completions.create(**kwargs)
-            text = r.choices[0].message.content.strip()
+            text = r.choices[0].message.content.strip() if r.choices[0].message.content else ""
         except Exception as e:
             logger.error("Vision detect failed for %s: %s", camera_id, e)
             return None
@@ -302,11 +303,16 @@ class SpaceLogger:
             return None
 
         target_present = parsed.get("target_present", False)
-        reasoning = parsed.get("reasoning", "")
-        if target_present:
-            logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning)
+        evidence_list = parsed.get("visual_evidence", [])
+        if isinstance(evidence_list, list):
+            reasoning_str = "\n".join(str(e) for e in evidence_list)
         else:
-            logger.info("[detect:%s] target_present=False reason=%s", camera_id, reasoning)
+            reasoning_str = str(evidence_list)
+        parsed["reasoning"] = reasoning_str
+        if target_present:
+            logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning_str)
+        else:
+            logger.info("[detect:%s] target_present=False reason=%s", camera_id, reasoning_str)
         return parsed
 
     def space_snapshot(self, space_id: str, space_name: str,
@@ -378,12 +384,13 @@ class SpaceLogger:
 
         text = None
         try:
+            _msgs = []
+            if system_prompt:
+                _msgs.append({"role": "system", "content": system_prompt})
+            _msgs.append({"role": "user", "content": user_messages})
             response_kwargs = {
                 "model": self.config.model_name,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_messages},
-                ],
+                "messages": _msgs,
                 "max_tokens": 2048,
             }
             if self.config.json_response_format:

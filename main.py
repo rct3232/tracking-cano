@@ -54,7 +54,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
-def run_multi(config_path: str, repo: LogRepository | None = None, app_config: AppConfig | None = None, config_repo=None):
+def run_multi(config_path: str, repo: LogRepository | None = None, app_config: AppConfig | None = None, config_repo=None, timeout: int | None = None):
     from api.event_bus import EventBus
     from api.server import start_api
 
@@ -79,9 +79,13 @@ def run_multi(config_path: str, repo: LogRepository | None = None, app_config: A
         watcher.start()
         config_watcher_stop = lambda: watcher.stop()
 
+    start_time = time.time()
     all_finished_since: float | None = None
     try:
         while _running:
+            if timeout is not None and time.time() - start_time > timeout:
+                logger.info("Timeout reached (%ds), exiting", timeout)
+                break
             if orchestrator.all_finished:
                 if all_finished_since is None:
                     all_finished_since = time.time()
@@ -106,6 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tracking-Cano")
     parser.add_argument("--config", default="configuration.yaml", help="Config file path")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG-level logging")
+    parser.add_argument("--timeout", "-t", type=int, default=None, help="Run for N seconds then exit")
     args = parser.parse_args()
 
     if args.verbose or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG":
@@ -148,7 +153,7 @@ def main():
         logger.error("No cameras configured — define at least one camera in the config")
         sys.exit(1)
 
-    run_multi(args.config, repo=repo, app_config=app_config, config_repo=config_repo)
+    run_multi(args.config, repo=repo, app_config=app_config, config_repo=config_repo, timeout=args.timeout)
 
 
 if __name__ == "__main__":

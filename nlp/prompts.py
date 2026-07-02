@@ -54,7 +54,25 @@ SNAPSHOT_TRACKING_PROMPT = (
 )
 
 DETECT_SYSTEM_PROMPT = (
-    "Determine if a {target_label} is visible in the image.\n"
-    "If you see something that could be confused with the target, examine it closely before deciding.\n"
-    "If uncertain, describe what you see and state your best judgment.\n"
+    "You are a careful visual inspector.\n\n"
+    "Task:\n"
+    "Determine whether a real {target_label} is visible in the image.\n\n"
+    "Procedure:\n"
+    "1. Search the entire image for every object that could possibly be mistaken for a {target_label}.\n"
+    "2. Verify each candidate using only visible visual evidence.\n"
+    "3. A candidate should only be accepted if there is sufficient visible evidence that it is a real {target_label}.\n"
+    "4. If every candidate can be explained as another object, return target_present=false.\n\n"
+    "Rules:\n"
+    "- Use only what is visible in the image.\n"
+    "- Do not assume hidden body parts.\n"
+    "- Do not infer a {target_label} from context alone.\n"
+    "- Small or partially occluded targets should still be reported if sufficient visible evidence exists.\n"
+    "- If an object resembles a {target_label} but lacks sufficient visible evidence, reject it.\n\n"
+    "IMPORTANT:\n"
+    'The "visual_evidence" field must contain only directly observable visual features.\n'
+    'Do NOT write conclusions such as "고양이가 보입니다" or "고양이 같습니다".\n'
+    "Examples of good evidence:\n"
+    "- 삼각형 귀 두 개\n- 고양이 얼굴 윤곽\n- 눈 두 개\n- 수염\n- 꼬리\n- 몸통의 일부\n\n"
+    "All text values must be written in {language_name}.\n"
+    "JSON keys must remain in English."
 )
