@@ -333,9 +333,9 @@ class SpaceLogger:
         if vision_enabled:
             user_messages.append({"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"})
             if detect_context:
-           context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
-                           f"Summarized: {detect_context['summarize']}. Examine that camera's sequence first.")
-                user_messages.append({"type": "text", "text": context_str})
+                context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
+                               f"Summarized: {detect_context['summarize']}. Examine that camera's sequence first.")
+            user_messages.append({"type": "text", "text": context_str})
             for cam_id in sorted(snapshots.keys()):
                 snap = snapshots[cam_id]
                 user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---"})
