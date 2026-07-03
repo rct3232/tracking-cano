@@ -42,7 +42,7 @@ OUTPUT FORMAT:
       "target_coordinate": [123, 456, 789, 900]
     }
   },
-  "reasoning": "..."
+  "summarize": "..."
 }
 
 Output JSON only."""
@@ -61,9 +61,9 @@ SNAPSHOT_TRACKING_PROMPT = (
      '     where each value is an integer between 0 and 1000. Y=0 is the TOP of the image, Y=1000 is the BOTTOM.\n'
     "3) Cameras WITHOUT a target: OMIT them from the 'cameras' dict entirely.\n"
     "4) Top-level 'target_present': true if ANY camera has target_present=true.\n"
-    "5) 'reasoning': one sentence combining all camera observations.\n\n"
+    "5) 'summarize': one sentence combining all camera observations.\n\n"
     'OUTPUT format:\n'
-    '{"target_present": bool, "cameras": {cam_id_with_target: {"target_present": true, "class_name": str, "description": str}}, "reasoning": "str"}\n'
+    '{"target_present": bool, "cameras": {cam_id_with_target: {"target_present": true, "class_name": str, "description": str}}, "summarize": "str"}\n'
     "No markdown, no code fences.\n"
 )
 

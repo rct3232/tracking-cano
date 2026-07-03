@@ -306,14 +306,14 @@ class SpaceLogger:
         target_present = parsed.get("target_present", False)
         evidence_list = parsed.get("visual_evidence", [])
         if isinstance(evidence_list, list):
-            reasoning_str = "\n".join(str(e) for e in evidence_list)
+            summarize_str = "\n".join(str(e) for e in evidence_list)
         else:
-            reasoning_str = str(evidence_list)
-        parsed["reasoning"] = reasoning_str
+            summarize_str = str(evidence_list)
+        parsed["summarize"] = summarize_str
         if target_present:
-            logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning_str)
+            logger.info("[detect:%s] target_present=True summarize=%s", camera_id, summarize_str)
         else:
-            logger.info("[detect:%s] target_present=False reason=%s", camera_id, reasoning_str)
+            logger.info("[detect:%s] target_present=False summarize=%s", camera_id, summarize_str)
         return parsed
 
     def space_snapshot(self, space_id: str, space_name: str,
@@ -333,8 +333,8 @@ class SpaceLogger:
         if vision_enabled:
             user_messages.append({"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"})
             if detect_context:
-                context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
-                               f"Reasoning: {detect_context['reasoning']}. Examine that camera's sequence first.")
+           context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
+                           f"Summarized: {detect_context['summarize']}. Examine that camera's sequence first.")
                 user_messages.append({"type": "text", "text": context_str})
             for cam_id in sorted(snapshots.keys()):
                 snap = snapshots[cam_id]
@@ -358,7 +358,7 @@ class SpaceLogger:
             if llm_system_prompt:
                 parts.append(f"Additional instructions:\n{llm_system_prompt}")
             lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
-            parts.append(f"IMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English.")
+            parts.append(f"IMPORTANT: All description and summarize fields MUST be written in {lang_name}. JSON keys must remain in English.")
             system_prompt = "\n".join(parts)
             user_messages.append({"type": "text", "text": f"Respond in {lang_name}."})
         else:
@@ -376,7 +376,7 @@ class SpaceLogger:
                 coord_str = f" | bbox {snap.target_coordinate}" if snap.target_coordinate else ""
                 prompt_lines.append(f"- {cam_id}: {tracking_str}{coord_str}")
             lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
-            system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
+            system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and summarize fields MUST be written in {lang_name}. JSON keys must remain in English."
             user_messages = [{"type": "text", "text": "\n".join(prompt_lines) + f"\n\nRespond in {lang_name}."}]
 
         if not self.debouncer.should_call(f"{space_id}_snapshot"):
@@ -407,11 +407,11 @@ class SpaceLogger:
             return self._snapshot_fallback(space_id, snapshots, timestamp, space_name, batch_id, target_classes)
 
         cameras_resp = parsed.get("cameras", {})
-        reasoning = parsed.get("reasoning", "")
-        if not reasoning and isinstance(cameras_resp, dict):
+        summarize = parsed.get("summarize", "")
+        if not summarize and isinstance(cameras_resp, dict):
             for v in cameras_resp.values():
                 if isinstance(v, str):
-                    reasoning = v
+                    summarize = v
                     break
 
         top_level_present = parsed.get("target_present", False)
@@ -439,7 +439,7 @@ class SpaceLogger:
                     coord = None
                     merged_present = False
                 elif isinstance(cam_resp, dict):
-                    desc = cam_resp.get("description", "") or cam_resp.get("reasoning", "")
+                    desc = cam_resp.get("description", "") or cam_resp.get("summarize", "")
                     class_name = cam_resp.get("class_name", "") or ""
                     visual_evidence = cam_resp.get("visual_evidence", None)
                     raw_coord = cam_resp.get("target_coordinate")
@@ -481,7 +481,7 @@ class SpaceLogger:
             "target_present": target_present_all,
             "cameras": {cam_id: {"description": desc, "target_coordinate": snap.target_coordinate}
                         for cam_id, snap in snapshots.items()},
-            "reasoning": reasoning,
+            "summarize": summarize,
         }
         log_text = json.dumps(log_entry)
         self._db_insert(
@@ -490,12 +490,12 @@ class SpaceLogger:
             batch_id=batch_id,
             subject_id=space_id,
             target_present=target_present_all,
-            description=reasoning,
+            description=summarize,
             raw_json=log_text,
         )
 
         logger.debug("[snapshot:%s] parsed per-camera: %s", space_id, json.dumps(cameras_resp))
-        logger.info("[snapshot:%s] cameras=%d reasoning=%s", space_id, len(snapshots), reasoning)
+        logger.info("[snapshot:%s] cameras=%d summarize=%s", space_id, len(snapshots), summarize)
         return log_text
 
 
@@ -530,7 +530,7 @@ class SpaceLogger:
                             target_classes: List[str] | None = None) -> str:
         if not batch_id:
             batch_id = uuid4().hex
-        reasoning_parts = []
+        summarize_parts = []
         for cam_id, snap in snapshots.items():
             desc = "no target detected"
             coord = None
@@ -538,7 +538,7 @@ class SpaceLogger:
             if snap.target_present:
                 desc = "target detected"
                 coord = snap.target_coordinate
-            reasoning_parts.append(f"{cam_id}: {desc}")
+            summarize_parts.append(f"{cam_id}: {desc}")
 
             img_path = None
             if (snap.image_b64 or snap.images) and snap.target_present:
@@ -557,12 +557,12 @@ class SpaceLogger:
             )
 
         target_present_all = any(s.target_present for s in snapshots.values())
-        reasoning = " | ".join(reasoning_parts)
+        summarize = " | ".join(summarize_parts)
         log_entry = {
             "target_present": target_present_all,
             "cameras": {cam_id: {"description": desc} for cam_id, desc in
-                       zip(snapshots.keys(), [r.split(": ", 1)[1] for r in reasoning_parts])},
-            "reasoning": reasoning,
+                       zip(snapshots.keys(), [r.split(": ", 1)[1] for r in summarize_parts])},
+            "summarize": summarize,
         }
         log_text = json.dumps(log_entry)
         self._db_insert(
@@ -571,7 +571,7 @@ class SpaceLogger:
             batch_id=batch_id,
             subject_id=space_id,
             target_present=target_present_all,
-            description=reasoning,
+            description=summarize,
             raw_json=log_text,
         )
         return log_text
