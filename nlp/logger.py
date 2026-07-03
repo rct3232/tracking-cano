@@ -306,14 +306,14 @@ class SpaceLogger:
         target_present = parsed.get("target_present", False)
         evidence_list = parsed.get("visual_evidence", [])
         if isinstance(evidence_list, list):
-            summarize_str = "\n".join(str(e) for e in evidence_list)
+            reasoning_str = "\n".join(str(e) for e in evidence_list)
         else:
-            summarize_str = str(evidence_list)
-        parsed["summarize"] = summarize_str
+            reasoning_str = str(evidence_list)
+        parsed["reasoning"] = reasoning_str
         if target_present:
-            logger.info("[detect:%s] target_present=True summarize=%s", camera_id, summarize_str)
+            logger.info("[detect:%s] target_present=True reason=%s", camera_id, reasoning_str)
         else:
-            logger.info("[detect:%s] target_present=False summarize=%s", camera_id, summarize_str)
+            logger.info("[detect:%s] target_present=False reason=%s", camera_id, reasoning_str)
         return parsed
 
     def space_snapshot(self, space_id: str, space_name: str,
@@ -334,8 +334,8 @@ class SpaceLogger:
             user_messages.append({"type": "text", "text": f"Timestamp: {timestamp}\nSpace: {space_name}"})
             if detect_context:
                 context_str = (f"\nDETECTION CONTEXT: Camera '{detect_context['camera']}' detected the target. "
-                               f"Summarized: {detect_context['summarize']}. Examine that camera's sequence first.")
-            user_messages.append({"type": "text", "text": context_str})
+                               f"Reasoning: {detect_context['reasoning']}. Examine that camera's sequence first.")
+                user_messages.append({"type": "text", "text": context_str})
             for cam_id in sorted(snapshots.keys()):
                 snap = snapshots[cam_id]
                 user_messages.append({"type": "text", "text": f"\n--- [{cam_id}] ---"})
@@ -358,7 +358,7 @@ class SpaceLogger:
             if llm_system_prompt:
                 parts.append(f"Additional instructions:\n{llm_system_prompt}")
             lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
-            parts.append(f"IMPORTANT: All description and summarize fields MUST be written in {lang_name}. JSON keys must remain in English.")
+            parts.append(f"IMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English.")
             system_prompt = "\n".join(parts)
             user_messages.append({"type": "text", "text": f"Respond in {lang_name}."})
         else:
@@ -376,7 +376,7 @@ class SpaceLogger:
                 coord_str = f" | bbox {snap.target_coordinate}" if snap.target_coordinate else ""
                 prompt_lines.append(f"- {cam_id}: {tracking_str}{coord_str}")
             lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
-            system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and summarize fields MUST be written in {lang_name}. JSON keys must remain in English."
+            system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
             user_messages = [{"type": "text", "text": "\n".join(prompt_lines) + f"\n\nRespond in {lang_name}."}]
 
         if not self.debouncer.should_call(f"{space_id}_snapshot"):

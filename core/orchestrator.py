@@ -143,7 +143,7 @@ class _SimpleVisionDetector:
                     self._update_all_snapshots(space_id, frozen_buffers, detect_cam_id=cam_id, detect_entry=entry)
                     detect_context = {
                         "camera": cam_id,
-                        "summarize": result.get("summarize", ""),
+                        "reasoning": result.get("reasoning", ""),
                     }
                     self._orchestrator.request_space_snapshot(space_id, detect_context=detect_context)
 
