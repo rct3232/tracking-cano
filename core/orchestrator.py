@@ -99,7 +99,7 @@ class _SimpleVisionDetector:
                 idx = self._detect_index.get(space_id, 0)
                 if idx >= len(space.camera_ids):
                     self._detect_index[space_id] = 0
-                    self._stop_event.wait(0.1)
+                    self._stop_event.wait(self._config.detect_cooldown if self._config.detect_cooldown > 0 else 0.1)
                     continue
 
                 cam_id = space.camera_ids[idx]
@@ -218,7 +218,7 @@ class Orchestrator:
 
         now = time.monotonic()
         last = self._snapshot_debounce.get(space_id, 0)
-        if now - last < 5.0:
+        if now - last < self.space_logger.config.snapshot_cooldown:
             logger.debug("[space:%s] snapshot debounce", space_id)
             return
         self._snapshot_debounce[space_id] = now

@@ -89,7 +89,6 @@ class LLMUpdate(BaseModel):
     vision_enabled: Optional[bool] = None
     vision_quality: Optional[int] = None
     vision_max_width: Optional[int] = None
-    cooldown_seconds: Optional[float] = None
     json_response_format: Optional[bool] = None
 
 

@@ -10,7 +10,7 @@ Snapshot: CameraSnapshot buffer freeze → `SpaceLogger.space_snapshot()` → DB
 ## Commandments
 0. **디버깅 시 DEBUG 로깅 필수** — 문제 진단이 필요한 경우 반드시 `--verbose`/`-v`(또는 `LOG_LEVEL=DEBUG`)를 추가하여 실행하고, `docker logs`(또는 stdout) 출력에서 증거를 수집할 것. 추측으로 원인을 단정하지 말 것.
 1. **코드가 진실** — 설정값/env var/CLI 플래그는 settings.py, configuration.yaml.example, main.py --help를 직접 읽고 AGENTS.md에 값 나열 금지
-2. **LLM 직접 호출 금지** — 반드시 `LLMCallDebouncer`(cooldown=5s) 경유 (`nlp/logger.py:72`)
+2. **LLM 직접 호출 금지** — 모든 LLM 호출은 SpaceLogger를 경유해야 함. 빈도 통제는 orchestrator의 snapshot_cooldown과 detect_cooldown이 담당함.
 3. **환경변수 추가 시 configuration.yaml.example 필수** — 새 설정 추가 시 configuration.yaml.example에 반드시 추가
 4. **Docker 실행 의무** — 로컬에서 `python main.py` 직접 실행 금지, 반드시 Docker로 실행.
 5. **DATABASE_URL 우선순위** — `DATABASE_URL` env var가 설정되면 해당 DB 사용. 미설정 시 기본값 `sqlite:///logs/tracking.db`. PostgreSQL은 `postgresql://user:pass@host:5432/dbname` 형식.
@@ -28,7 +28,7 @@ Snapshot: CameraSnapshot buffer freeze → `SpaceLogger.space_snapshot()` → DB
 | `core/config_listener.py` | `ConfigListener` — PostgreSQL LISTEN/NOTIFY + polling 폴백 |
 | `core/yaml_writer.py` | 원자적 YAML 읽기/쓰기 (REST API → config) |
 
-| `nlp/logger.py` | `LLMCallDebouncer`(5s), `SpaceLogger.vision_detect()`, `SpaceLogger.space_snapshot()`, `_snapshot_fallback()` |
+| `nlp/logger.py` | `SpaceLogger.vision_detect()`, `SpaceLogger.space_snapshot()`, `_snapshot_fallback()` |
 | `nlp/prompts.py` | LLM 시스템 프롬프트 상수 (`DETECT_SYSTEM_PROMPT`, `SNAPSHOT_VISION_PROMPT`, `SNAPSHOT_TRACKING_PROMPT`) |
 
 | `api/server.py` | FastAPI 앱 + uvicorn daemon thread |

@@ -10,6 +10,8 @@ llm:
   max_stale_threshold: 10.0 # 버퍼 항목 유효 시간 (초)
   json_response_format: true  # response_format={"type": "json_object"} 강제 사용 여부
   log_language: en            # LLM 출력 언어 (iso 639-1 2자리 코드: en, ko, ja 등)
+  # snapshot_cooldown: 30     # space snapshot debounce 간격 (초, 기본 5.0)
+  # detect_cooldown: 60       # space detect loop 사이클 간 대기 (초, 기본 0=비활성화)
 
 # === 재연결 설정 ===
 reconnect:

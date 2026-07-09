@@ -15,6 +15,8 @@ class LLMConfig:
     max_stale_threshold: float = 10.0
     json_response_format: bool = True
     log_language: str = "en"
+    snapshot_cooldown: float = 5.0
+    detect_cooldown: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LLMConfig':

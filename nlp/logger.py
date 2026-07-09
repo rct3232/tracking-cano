@@ -44,24 +44,6 @@ class CameraSnapshot:
     target_coordinate: Optional[List[float]] = None
 
 
-class LLMCallDebouncer:
-    def __init__(self, cooldown_seconds: float = 3.0):
-        self.cooldown = cooldown_seconds
-        self._last_call: Dict[str, float] = {}
-
-    def should_call(self, key: str) -> bool:
-        now = time.time()
-        last = self._last_call.get(key, 0.0)
-        if now - last < self.cooldown:
-            return False
-        self._last_call[key] = now
-        return True
-
-
-
-
-
-
 class SpaceLogger:
     def __init__(self, config: LLMConfig, log_dir: str = "logs", repo=None, event_bus=None, minio_config=None, log_config=None):
         self.config = config
@@ -69,7 +51,6 @@ class SpaceLogger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._repo = repo
         self._event_bus = event_bus
-        self.debouncer = LLMCallDebouncer(cooldown_seconds=5.0)
         self.client: Optional[OpenAI] = None
         self._lock = threading.Lock()
         self._minio = None
@@ -378,10 +359,6 @@ class SpaceLogger:
             lang_name = _LANG_NAMES.get(self.config.log_language, self.config.log_language)
             system_prompt = SNAPSHOT_TRACKING_PROMPT + f"\n\nIMPORTANT: All description and reasoning fields MUST be written in {lang_name}. JSON keys must remain in English."
             user_messages = [{"type": "text", "text": "\n".join(prompt_lines) + f"\n\nRespond in {lang_name}."}]
-
-        if not self.debouncer.should_call(f"{space_id}_snapshot"):
-            logger.debug("[space:%s] snapshot debounce suppress", space_id)
-            return None
 
         text = None
         try:
