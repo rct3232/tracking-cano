@@ -7,6 +7,8 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
+import traceback
 import time
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +54,13 @@ def _handle_signal(signum, frame):
 
 signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
+
+
+def _thread_excepthook(args):
+    logger.error("Unhandled exception in thread '%s':\n%sTraceback:\n%s",
+                 args.thread.name, "" if args.exc_msg else "Message: ", "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+threading.excepthook = _thread_excepthook
 
 
 def run_multi(config_path: str, repo: LogRepository | None = None, app_config: AppConfig | None = None, config_repo=None, timeout: int | None = None):

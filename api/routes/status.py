@@ -12,8 +12,26 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health(_: str = Depends(verify_token)) -> Dict[str, str]:
-    return {"status": "ok"}
+async def health(_: str = Depends(verify_token)) -> Dict[str, Any]:
+    from api.server import _orchestrator
+
+    result: Dict[str, Any] = {"status": "ok", "collectors": {}}
+    if _orchestrator is not None:
+        for cam in _orchestrator.app_config.cameras:
+            collector = _orchestrator._collectors.get(cam.id)
+            alive = False
+            finished = False
+            buf_len = 0
+            if collector:
+                alive = collector.thread.is_alive()
+                finished = collector._finished
+                buf_len = len(collector.buffer)
+            result["collectors"][cam.id] = {
+                "alive": alive,
+                "finished": finished,
+                "buffer_size": buf_len,
+            }
+    return result
 
 
 @router.get("/status", response_model=SystemStatus)

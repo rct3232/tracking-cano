@@ -167,6 +167,8 @@ class _BatchCollector:
         if cap is None:
             logger.error("Cannot open camera %s from %s", self.camera_id, self.source)
             self._finished = True
+            if self.on_finished:
+                self.on_finished(self.camera_id)
             return
 
         connect_wall = time.monotonic()

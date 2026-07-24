@@ -150,7 +150,8 @@ class _SimpleVisionDetector:
                 self._detect_index[space_id] = idx + 1
             except Exception:
                 logger.exception("[vision-detector:%s] _run_space crashed", space_id)
-                return
+                self._stop_event.wait(5)
+                continue
 
     def _get_target_classes(self, space_id: str) -> List[str]:
         """Collect unique target_classes from all cameras in a space."""
@@ -207,6 +208,24 @@ class Orchestrator:
         self._snapshots: Dict[str, CameraSnapshot] = {}
         self._snapshot_debounce: Dict[str, float] = {}
         self._snapshot_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._health_thread: Optional[threading.Thread] = None
+
+    def _health_check_loop(self):
+        while not self._stop_event.is_set():
+            with self._lock:
+                collectors = list(self._collectors.items())
+            for cam_id, collector in collectors:
+                if not collector.thread.is_alive() or collector._finished:
+                    logger.warning(
+                        "[health] Collector %s dead (alive=%s, finished=%s) — restarting",
+                        cam_id, collector.thread.is_alive(), collector._finished,
+                    )
+                    self.remove_camera(cam_id)
+                    cam = next((c for c in self.app_config.cameras if c.id == cam_id), None)
+                    if cam:
+                        self.add_camera(cam)
+            self._stop_event.wait(15)
 
     def update_snapshot(self, camera_id: str, snapshot: CameraSnapshot):
         with self._snapshot_lock:
@@ -301,6 +320,10 @@ class Orchestrator:
             )
             self._vision_detector.start()
 
+        self._health_thread = threading.Thread(target=self._health_check_loop, daemon=True, name="health-monitor")
+        self._health_thread.start()
+        logger.debug("[health] monitor started (interval=15s)")
+
     def add_camera(self, camera: CameraConfig, start_event: threading.Event | None = None,
                     capture_start: float | None = None):
         space_id = self._cam_to_space.get(camera.id)
@@ -361,6 +384,9 @@ class Orchestrator:
         return []
 
     def stop(self):
+        self._stop_event.set()
+        if self._health_thread and self._health_thread.is_alive():
+            self._health_thread.join(timeout=16)
         if self._vision_detector:
             self._vision_detector.stop()
         with self._lock:
